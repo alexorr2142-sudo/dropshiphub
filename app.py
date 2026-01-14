@@ -31,6 +31,7 @@ from core.ops_pack import make_daily_ops_pack_bytes
 from core.suppliers import enrich_followups_with_suppliers, add_missing_supplier_contact_exceptions
 from core.actions import build_daily_action_list
 from core.customer_impact import build_customer_impact_view
+from core.supplier_accountability import build_supplier_accountability_view
 
 from ui.auth import early_access_gate, require_email_access_gate
 from ui.sidebar import render_sidebar_context
@@ -39,6 +40,7 @@ from ui.templates import render_template_downloads
 from ui.workspaces_ui import render_workspaces_sidebar_and_maybe_override_outputs
 from ui.actions_ui import render_daily_action_list
 from ui.customer_impact_ui import render_customer_impact_view
+from ui.supplier_accountability_ui import render_supplier_accountability
 
 
 # -------------------------------
@@ -61,6 +63,7 @@ def _startup_sanity_check():
         "core/scorecards.py",
         "core/actions.py",
         "core/customer_impact.py",
+        "core/supplier_accountability.py",
         "ui/__init__.py",
         "ui/auth.py",
         "ui/demo.py",
@@ -69,6 +72,7 @@ def _startup_sanity_check():
         "ui/workspaces_ui.py",
         "ui/actions_ui.py",
         "ui/customer_impact_ui.py",
+        "ui/supplier_accountability_ui.py",
     ]
     missing = [rel for rel in required if not (ROOT / rel).exists()]
     if missing:
@@ -170,8 +174,9 @@ with st.expander("Onboarding checklist", expanded=True):
 5. Click **Run reconciliation** (this refreshes outputs)  
 6. Review **Daily Action List** (what to do today)  
 7. Review **Customer Impact View** (draft customer messages)  
-8. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
-9. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
+8. Review **Supplier Accountability Mode** (supplier performance note)  
+9. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
+10. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
         """.strip()
     )
 
@@ -414,7 +419,6 @@ k5.metric("% Late Unshipped", f"{kpis.get('pct_late_unshipped', 0)}%")
 # Daily Action List (Feature #1)
 # -------------------------------
 actions = build_daily_action_list(exceptions=exceptions, followups=followups, max_items=10)
-from ui.actions_ui import render_daily_action_list  # safe import even if reloaded
 render_daily_action_list(actions)
 
 # -------------------------------
@@ -422,6 +426,12 @@ render_daily_action_list(actions)
 # -------------------------------
 customer_impact = build_customer_impact_view(exceptions=exceptions, max_items=50)
 render_customer_impact_view(customer_impact)
+
+# -------------------------------
+# Supplier Accountability Mode (Feature #3)
+# -------------------------------
+accountability_view = build_supplier_accountability_view(scorecard, top_n=10)
+render_supplier_accountability(accountability_view)
 
 # -------------------------------
 # Exceptions Queue
