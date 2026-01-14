@@ -29,6 +29,8 @@ st.set_page_config(page_title="Dropship Hub", layout="wide")
 ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
 
 st.title("Dropship Hub — Early Access")
+st.caption("Drop ship made easy — exceptions, follow-ups, and visibility in one hub.")
+
 code = st.text_input("Enter early access code", type="password")
 
 if code != ACCESS_CODE:
@@ -42,7 +44,7 @@ BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 
 # -------------------------------
-# Onboarding checklist (Step 6F-ish)
+# Onboarding checklist
 # -------------------------------
 st.divider()
 with st.expander("Onboarding checklist", expanded=True):
@@ -57,7 +59,7 @@ with st.expander("Onboarding checklist", expanded=True):
     )
 
 # -------------------------------
-# Demo Mode (Step 2)
+# Demo Mode
 # -------------------------------
 st.subheader("Start here")
 use_demo = st.button("Try demo data (no uploads)")
@@ -92,7 +94,7 @@ with col3:
     f_tracking = st.file_uploader("Tracking CSV (optional)", type=["csv"])
 
 # -------------------------------
-# Template downloads (reduces drop-off)
+# Template downloads
 # -------------------------------
 st.subheader("Download templates")
 
@@ -240,8 +242,7 @@ except Exception as e:
 try:
     exceptions = enhance_explanations(exceptions)
 except Exception:
-    # Never crash the app because AI failed
-    pass
+    pass  # never crash because AI failed
 
 # -------------------------------
 # Dashboard KPIs
@@ -255,6 +256,35 @@ k2.metric("% Shipped/Delivered", f"{kpis.get('pct_shipped_or_delivered', 0)}%")
 k3.metric("% Delivered", f"{kpis.get('pct_delivered', 0)}%")
 k4.metric("% Unshipped", f"{kpis.get('pct_unshipped', 0)}%")
 k5.metric("% Late Unshipped", f"{kpis.get('pct_late_unshipped', 0)}%")
+
+# -------------------------------
+# "What am I looking at?" panel (Step 1)
+# -------------------------------
+st.divider()
+with st.expander("What am I looking at?", expanded=True):
+    st.markdown(
+        """
+### How to use this app (daily workflow)
+
+**1) Start with the Exceptions Queue**
+- These are the **order lines (SKU-level)** that need attention.
+- Common reasons:
+  - Orders are **late and unshipped**
+  - **Partial shipments**
+  - **Missing tracking**
+  - **Carrier exceptions**
+
+**2) Use Supplier Follow-ups**
+- Copy/paste the email text to request **tracking or an updated ship date**.
+- This is the fastest way to reduce customer complaints.
+
+**3) Check Order Rollup**
+- One row per order so you can quickly see **overall status**.
+- Use this view for customer support updates.
+
+**Tip:** Click **Try demo data** to understand the flow in 30 seconds before uploading your own files.
+        """.strip()
+    )
 
 # -------------------------------
 # Exceptions Queue
@@ -272,11 +302,11 @@ else:
         issue_filter = st.multiselect("Issue types", issue_types, default=issue_types)
 
     with fcol2:
-        countries = sorted([c for c in exceptions.get("customer_country", pd.Series([])).dropna().unique().tolist() if str(c).strip() != ""])
+        countries = sorted([c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist() if str(c).strip() != ""])
         country_filter = st.multiselect("Customer country", countries, default=countries)
 
     with fcol3:
-        suppliers = sorted([s for s in exceptions.get("supplier_name", pd.Series([])).dropna().unique().tolist() if str(s).strip() != ""])
+        suppliers = sorted([s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist() if str(s).strip() != ""])
         supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers)
 
     filtered = exceptions.copy()
