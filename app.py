@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+
 # --- Local modules (your repo files) ---
 try:
     from normalize import normalize_orders, normalize_shipments, normalize_tracking
@@ -65,6 +66,10 @@ def copy_button(text: str, label: str, key: str):
 # Exceptions urgency + styling (Step B)
 # -------------------------------
 def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds an 'Urgency' column based on issue_type/explanation/next_action/customer_risk/line_status.
+    Best-effort and safe (won't crash if columns are missing).
+    """
     df = exceptions_df.copy()
 
     def classify_row(row) -> str:
@@ -127,8 +132,7 @@ def style_exceptions_table(df: pd.DataFrame):
 
 
 # -------------------------------
-# Basic auth helpers (Step C)
-# (You want "accept all emails" -> keep allowlist empty)
+# Basic auth helpers (accept-all mode)
 # -------------------------------
 def _parse_allowed_emails_from_env() -> list[str]:
     raw = os.getenv("DSH_ALLOWED_EMAILS", "").strip()
@@ -153,8 +157,8 @@ def get_allowed_emails() -> list[str]:
 def require_email_access_gate():
     st.subheader("Access")
     _ = st.text_input("Work email", key="auth_email").strip().lower()
-
     allowed = get_allowed_emails()
+
     if allowed:
         if not _:
             st.info("Enter your work email to continue.")
@@ -165,7 +169,6 @@ def require_email_access_gate():
             st.stop()
         st.success("Email verified ✅")
     else:
-        # Accept all emails (your requested behavior)
         st.caption("Email verification is currently disabled (accepting all emails).")
 
 
@@ -358,8 +361,7 @@ def load_suppliers(suppliers_dir: Path, account_id: str, store_id: str) -> pd.Da
     p = suppliers_path(suppliers_dir, account_id, store_id)
     if p.exists():
         try:
-            df = pd.read_csv(p)
-            return df
+            return pd.read_csv(p)
         except Exception:
             return pd.DataFrame()
     return pd.DataFrame()
@@ -373,7 +375,6 @@ def save_suppliers(suppliers_dir: Path, account_id: str, store_id: str, df: pd.D
 
 
 def style_supplier_table(df: pd.DataFrame):
-    # highlight missing emails
     if "supplier_email" not in df.columns:
         return df.style
 
@@ -396,11 +397,9 @@ def enrich_followups_with_suppliers(followups: pd.DataFrame, suppliers_df: pd.Da
     if "supplier_name" not in f.columns or "supplier_name" not in s.columns:
         return followups
 
-    # normalize key
     f["_supplier_key"] = f["supplier_name"].map(normalize_supplier_key)
     s["_supplier_key"] = s["supplier_name"].map(normalize_supplier_key)
 
-    # keep only relevant columns
     cols = ["_supplier_key"]
     for c in ["supplier_email", "supplier_channel", "language", "timezone"]:
         if c in s.columns:
@@ -409,7 +408,6 @@ def enrich_followups_with_suppliers(followups: pd.DataFrame, suppliers_df: pd.Da
 
     merged = f.merge(s2, on="_supplier_key", how="left", suffixes=("", "_crm"))
 
-    # Fill/overwrite supplier_email if missing
     if "supplier_email" in f.columns:
         merged["supplier_email"] = merged["supplier_email"].fillna("")
         merged["supplier_email"] = merged["supplier_email"].where(
@@ -419,14 +417,10 @@ def enrich_followups_with_suppliers(followups: pd.DataFrame, suppliers_df: pd.Da
     else:
         merged["supplier_email"] = merged.get("supplier_email_crm", "").fillna("")
 
-    # bring other CRM fields if not already present
     for c in ["supplier_channel", "language", "timezone"]:
-        if c in merged.columns:
-            continue
-        if f"{c}_crm" in merged.columns:
+        if c not in merged.columns and f"{c}_crm" in merged.columns:
             merged[c] = merged[f"{c}_crm"]
 
-    # cleanup
     drop_cols = [c for c in merged.columns if c.endswith("_crm")] + ["_supplier_key"]
     merged = merged.drop(columns=[c for c in drop_cols if c in merged.columns])
 
@@ -434,18 +428,13 @@ def enrich_followups_with_suppliers(followups: pd.DataFrame, suppliers_df: pd.Da
 
 
 def add_missing_supplier_contact_exceptions(exceptions: pd.DataFrame, followups: pd.DataFrame) -> pd.DataFrame:
-    """
-    If a supplier needs a follow-up but has no email after CRM merge, create an exception row.
-    """
     if followups is None or followups.empty:
         return exceptions
 
     f = followups.copy()
-
     if "supplier_name" not in f.columns:
         return exceptions
 
-    # consider a supplier "needs follow-up" if item_count exists and > 0; otherwise if body exists.
     needs = pd.Series([True] * len(f))
     if "item_count" in f.columns:
         try:
@@ -455,7 +444,6 @@ def add_missing_supplier_contact_exceptions(exceptions: pd.DataFrame, followups:
 
     email = f.get("supplier_email", pd.Series([""] * len(f))).fillna("").astype(str).str.strip()
     missing = needs & (email == "")
-
     if missing.sum() == 0:
         return exceptions
 
@@ -482,8 +470,151 @@ def add_missing_supplier_contact_exceptions(exceptions: pd.DataFrame, followups:
     if exceptions is None or exceptions.empty:
         return add_df
 
-    # concat with alignment
     return pd.concat([exceptions, add_df], ignore_index=True, sort=False)
+
+
+# -------------------------------
+# Supplier Scorecards (Step 11)
+# -------------------------------
+def _contains_any(s: str, terms: list[str]) -> bool:
+    s = (s or "").lower()
+    return any(t in s for t in terms)
+
+
+def build_supplier_scorecard_from_run(line_status_df: pd.DataFrame, exceptions_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build per-supplier metrics from a single run (current or saved).
+    Works best if line_status_df has supplier_name.
+    Falls back gracefully.
+    """
+    if line_status_df is None or line_status_df.empty:
+        return pd.DataFrame()
+
+    df = line_status_df.copy()
+    if "supplier_name" not in df.columns:
+        return pd.DataFrame()
+
+    df["supplier_name"] = df["supplier_name"].fillna("").astype(str)
+    df = df[df["supplier_name"].str.strip() != ""].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    # total lines per supplier
+    base = df.groupby("supplier_name").size().reset_index(name="total_lines")
+
+    # exceptions per supplier (from exceptions_df if available)
+    exc = None
+    if exceptions_df is not None and not exceptions_df.empty and "supplier_name" in exceptions_df.columns:
+        exc = exceptions_df.copy()
+        exc["supplier_name"] = exc["supplier_name"].fillna("").astype(str)
+        exc = exc[exc["supplier_name"].str.strip() != ""].copy()
+        if not exc.empty:
+            if "Urgency" not in exc.columns:
+                exc = add_urgency_column(exc)
+
+            exc_counts = exc.groupby("supplier_name").size().reset_index(name="exception_lines")
+            crit = exc[exc["Urgency"] == "Critical"].groupby("supplier_name").size().reset_index(name="critical")
+            high = exc[exc["Urgency"] == "High"].groupby("supplier_name").size().reset_index(name="high")
+        else:
+            exc_counts = pd.DataFrame(columns=["supplier_name", "exception_lines"])
+            crit = pd.DataFrame(columns=["supplier_name", "critical"])
+            high = pd.DataFrame(columns=["supplier_name", "high"])
+    else:
+        exc_counts = pd.DataFrame(columns=["supplier_name", "exception_lines"])
+        crit = pd.DataFrame(columns=["supplier_name", "critical"])
+        high = pd.DataFrame(columns=["supplier_name", "high"])
+
+    out = base.merge(exc_counts, on="supplier_name", how="left").merge(crit, on="supplier_name", how="left").merge(high, on="supplier_name", how="left")
+    out["exception_lines"] = out["exception_lines"].fillna(0).astype(int)
+    out["critical"] = out["critical"].fillna(0).astype(int)
+    out["high"] = out["high"].fillna(0).astype(int)
+    out["exception_rate"] = (out["exception_lines"] / out["total_lines"]).round(4)
+
+    # heuristic flags from exceptions text (best-effort)
+    if exc is not None and not exc.empty:
+        def _flag_count(term_list):
+            tmp = exc.copy()
+            blob = (
+                tmp.get("issue_type", "").astype(str).fillna("") + " " +
+                tmp.get("explanation", "").astype(str).fillna("") + " " +
+                tmp.get("next_action", "").astype(str).fillna("")
+            ).str.lower()
+            tmp["_flag"] = blob.apply(lambda x: _contains_any(x, term_list))
+            return tmp[tmp["_flag"]].groupby("supplier_name").size().reset_index(name="count")
+
+        missing_tracking_terms = ["missing tracking", "no tracking", "tracking missing", "invalid tracking"]
+        late_terms = ["late", "overdue", "past due", "late unshipped"]
+        carrier_terms = ["carrier exception", "exception", "stuck", "lost", "returned to sender"]
+
+        mt = _flag_count(missing_tracking_terms).rename(columns={"count": "missing_tracking_flags"})
+        lt = _flag_count(late_terms).rename(columns={"count": "late_flags"})
+        ct = _flag_count(carrier_terms).rename(columns={"count": "carrier_exception_flags"})
+
+        out = out.merge(mt, on="supplier_name", how="left").merge(lt, on="supplier_name", how="left").merge(ct, on="supplier_name", how="left")
+        for c in ["missing_tracking_flags", "late_flags", "carrier_exception_flags"]:
+            out[c] = out.get(c, 0).fillna(0).astype(int)
+    else:
+        out["missing_tracking_flags"] = 0
+        out["late_flags"] = 0
+        out["carrier_exception_flags"] = 0
+
+    out = out.sort_values(["exception_rate", "critical", "high"], ascending=[False, False, False])
+    return out
+
+
+def _parse_run_id_to_dt(run_id: str):
+    # run_id format: 20260114T173012Z (UTC)
+    try:
+        return datetime.strptime(run_id, "%Y%m%dT%H%M%SZ")
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def load_recent_scorecard_history(ws_root_str: str, max_runs: int = 25) -> pd.DataFrame:
+    """
+    Loads last N saved runs and aggregates supplier scorecards per run into one table:
+    columns: run_id, run_dt, supplier_name, total_lines, exception_lines, exception_rate, critical, high, ...
+    """
+    ws_root = Path(ws_root_str)
+    runs = list_runs(ws_root)
+    runs = runs[:max_runs]
+
+    all_rows = []
+    for r in runs:
+        run_dir = Path(r["path"])
+        run_id = r.get("run_id", run_dir.name)
+        run_dt = _parse_run_id_to_dt(run_id)
+
+        line_path = run_dir / "line_status.csv"
+        exc_path = run_dir / "exceptions.csv"
+        if not line_path.exists():
+            continue
+
+        try:
+            line_df = pd.read_csv(line_path)
+        except Exception:
+            continue
+
+        try:
+            exc_df = pd.read_csv(exc_path) if exc_path.exists() else pd.DataFrame()
+        except Exception:
+            exc_df = pd.DataFrame()
+
+        sc = build_supplier_scorecard_from_run(line_df, exc_df)
+        if sc is None or sc.empty:
+            continue
+
+        sc = sc.copy()
+        sc["run_id"] = run_id
+        sc["run_dt"] = run_dt
+        all_rows.append(sc)
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    hist = pd.concat(all_rows, ignore_index=True, sort=False)
+    return hist
 
 
 # -------------------------------
@@ -500,12 +631,10 @@ st.title("Dropship Hub — Early Access")
 st.caption("Drop ship made easy — exceptions, follow-ups, and visibility in one hub.")
 
 code = st.text_input("Enter early access code", type="password", key="access_code")
-
 if code != ACCESS_CODE:
     st.info("This app is currently in early access. Enter your code to continue.")
     st.stop()
 
-# Email gate (accept-all mode)
 require_email_access_gate()
 
 # -------------------------------
@@ -547,16 +676,15 @@ with st.sidebar:
 - CSV uploads
 - Exceptions + supplier follow-ups
 - Supplier Directory (CRM)
+- Supplier scorecards
 
 **Pro**
 - Saved workspaces + run history
-- Supplier scorecards (coming soon)
 - Automations (coming soon)
 
 **Team**
 - Role-based access (coming soon)
 - Audit trail (coming soon)
-- Shared templates (coming soon)
             """.strip()
         )
 
@@ -579,7 +707,7 @@ with st.sidebar:
     st.divider()
     st.header("Supplier Directory (CRM)")
 
-    # Load any previously saved suppliers for this tenant
+    # Load saved suppliers for this tenant (once)
     if "suppliers_df" not in st.session_state:
         st.session_state["suppliers_df"] = load_suppliers(SUPPLIERS_DIR, account_id, store_id)
 
@@ -595,25 +723,23 @@ with st.sidebar:
             st.code(str(e))
 
     with st.expander("View Supplier Directory", expanded=False):
-        suppliers_df = st.session_state.get("suppliers_df", pd.DataFrame())
-        if suppliers_df is None or suppliers_df.empty:
+        suppliers_df_preview = st.session_state.get("suppliers_df", pd.DataFrame())
+        if suppliers_df_preview is None or suppliers_df_preview.empty:
             st.caption("No supplier directory loaded yet. Upload suppliers.csv to auto-fill follow-up emails.")
         else:
-            show_cols = [c for c in ["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"] if c in suppliers_df.columns]
+            show_cols = [c for c in ["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"] if c in suppliers_df_preview.columns]
             if not show_cols:
-                st.dataframe(suppliers_df, use_container_width=True, height=220)
+                st.dataframe(suppliers_df_preview, use_container_width=True, height=220)
             else:
-                st.dataframe(style_supplier_table(suppliers_df[show_cols]), use_container_width=True, height=220)
+                st.dataframe(style_supplier_table(suppliers_df_preview[show_cols]), use_container_width=True, height=220)
 
-            # quick stats
-            if "supplier_email" in suppliers_df.columns:
-                missing_emails = suppliers_df["supplier_email"].fillna("").astype(str).str.strip().eq("").sum()
+            if "supplier_email" in suppliers_df_preview.columns:
+                missing_emails = suppliers_df_preview["supplier_email"].fillna("").astype(str).str.strip().eq("").sum()
                 st.caption(f"Missing supplier_email: {int(missing_emails)} row(s) (highlighted)")
 
     st.divider()
     st.caption("Tip: Upload suppliers.csv once per account/store to auto-fill follow-up emails.")
 
-# Pull into local variable after sidebar is defined
 suppliers_df = st.session_state.get("suppliers_df", pd.DataFrame())
 
 # -------------------------------
@@ -628,7 +754,7 @@ with st.expander("Onboarding checklist", expanded=True):
 3. Upload **Shipments CSV** (supplier / agent export)  
 4. (Optional) Upload **Tracking CSV**  
 5. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
-6. (Optional) Upload **suppliers.csv** to auto-fill supplier emails and channels  
+6. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
         """.strip()
     )
 
@@ -731,12 +857,10 @@ with t3:
 # Run pipeline: demo OR uploads
 # -------------------------------
 has_uploads = (f_orders is not None) and (f_shipments is not None)
-
 if not (use_demo or has_uploads):
     st.info("Upload Orders + Shipments, or click **Try demo data** to begin.")
     st.stop()
 
-# Load uploads if not demo
 if not use_demo:
     try:
         raw_orders = pd.read_csv(f_orders)
@@ -769,7 +893,6 @@ if raw_tracking is not None and isinstance(raw_tracking, pd.DataFrame) and not r
     tracking, meta_t = normalize_tracking(raw_tracking, account_id=account_id, store_id=store_id)
 
 errs = meta_o.get("validation_errors", []) + meta_s.get("validation_errors", []) + meta_t.get("validation_errors", [])
-
 if errs:
     st.warning("We found some schema issues. You can still proceed, but fixing these improves accuracy:")
     for e in errs:
@@ -796,9 +919,7 @@ try:
 except Exception:
     pass
 
-# -------------------------------
-# Step 8: Enrich followups + add missing supplier contact exceptions
-# -------------------------------
+# Step 8: enrich followups with CRM + add "missing supplier contact" exceptions
 followups = enrich_followups_with_suppliers(followups, suppliers_df)
 exceptions = add_missing_supplier_contact_exceptions(exceptions, followups)
 
@@ -897,7 +1018,7 @@ with st.sidebar:
     else:
         st.caption("No saved runs yet. Click **Save this run** to create your first run history entry.")
 
-# If a run is loaded, override the outputs used by the UI below (+ suppliers snapshot if present)
+# If a run is loaded, override outputs (+ suppliers snapshot if present)
 if st.session_state.get("loaded_run"):
     loaded = load_run(Path(st.session_state["loaded_run"]))
     exceptions = loaded.get("exceptions", exceptions)
@@ -908,7 +1029,7 @@ if st.session_state.get("loaded_run"):
     loaded_suppliers = loaded.get("suppliers_df", pd.DataFrame())
     if loaded_suppliers is not None and not loaded_suppliers.empty:
         suppliers_df = loaded_suppliers
-        st.session_state["suppliers_df"] = loaded_suppliers  # keep UI consistent
+        st.session_state["suppliers_df"] = loaded_suppliers
 
     meta = loaded.get("meta", {}) or {}
     st.info(f"Viewing saved run: **{meta.get('workspace_name','')} / {meta.get('created_at','')}**")
@@ -927,31 +1048,93 @@ k4.metric("% Unshipped", f"{kpis.get('pct_unshipped', 0)}%")
 k5.metric("% Late Unshipped", f"{kpis.get('pct_late_unshipped', 0)}%")
 
 # -------------------------------
+# Supplier Scorecards (NEW)
+# -------------------------------
+st.divider()
+st.subheader("Supplier Scorecards (Performance + Trends)")
+
+scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
+if scorecard is None or scorecard.empty:
+    st.info("Scorecards require `supplier_name` in your normalized line status data.")
+else:
+    # quick filters
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        top_n = st.slider("Show top N suppliers", min_value=5, max_value=50, value=15, step=5)
+    with sc2:
+        min_lines = st.number_input("Min total lines", min_value=1, max_value=1000000, value=1, step=1)
+
+    view = scorecard[scorecard["total_lines"] >= int(min_lines)].head(int(top_n))
+
+    show_cols = [
+        "supplier_name",
+        "total_lines",
+        "exception_lines",
+        "exception_rate",
+        "critical",
+        "high",
+        "missing_tracking_flags",
+        "late_flags",
+        "carrier_exception_flags",
+    ]
+    show_cols = [c for c in show_cols if c in view.columns]
+    st.dataframe(view[show_cols], use_container_width=True, height=320)
+
+    st.download_button(
+        "Download Supplier Scorecards CSV",
+        data=scorecard.to_csv(index=False).encode("utf-8"),
+        file_name="supplier_scorecards.csv",
+        mime="text/csv",
+    )
+
+    # trend from saved runs (if any)
+    with st.expander("Trend over time (from saved runs)", expanded=True):
+        if not runs:
+            st.caption("No saved runs yet. Click **Save this run** to build trend history.")
+        else:
+            max_runs = st.slider("Use last N saved runs", 5, 50, 25, 5)
+            hist = load_recent_scorecard_history(str(ws_root), max_runs=int(max_runs))
+
+            if hist is None or hist.empty:
+                st.caption("No historical scorecards found yet (save a run first).")
+            else:
+                supplier_options = sorted(hist["supplier_name"].dropna().unique().tolist())
+                chosen_supplier = st.selectbox("Supplier", supplier_options)
+
+                s_hist = hist[hist["supplier_name"] == chosen_supplier].copy()
+                s_hist = s_hist.sort_values("run_dt")
+
+                # chart exception rate
+                chart_df = s_hist[["run_dt", "exception_rate"]].dropna()
+                if not chart_df.empty:
+                    chart_df = chart_df.set_index("run_dt")
+                    st.line_chart(chart_df)
+
+                # show run-by-run table
+                tcols = ["run_id", "total_lines", "exception_lines", "exception_rate", "critical", "high"]
+                tcols = [c for c in tcols if c in s_hist.columns]
+                st.dataframe(s_hist[tcols].sort_values("run_id", ascending=False), use_container_width=True, height=220)
+
+# -------------------------------
 # "What am I looking at?" panel
 # -------------------------------
 st.divider()
-with st.expander("What am I looking at?", expanded=True):
+with st.expander("What am I looking at?", expanded=False):
     st.markdown(
         """
 ### How to use this app (daily workflow)
 
 **1) Start with the Exceptions Queue**
 - These are the **order lines (SKU-level)** that need attention.
-- Common reasons:
-  - Orders are **late and unshipped**
-  - **Partial shipments**
-  - **Missing tracking**
-  - **Carrier exceptions**
 
 **2) Use Supplier Follow-ups**
 - Copy/paste the email text to request **tracking or an updated ship date**.
-- This is the fastest way to reduce customer complaints.
 
-**3) Check Order Rollup**
-- One row per order so you can quickly see **overall status**.
-- Use this view for customer support updates.
+**3) Use Supplier Scorecards**
+- Find suppliers with high exception rates
+- Track improvement over time (save runs daily)
 
-**Tip:** Upload **suppliers.csv** in the sidebar to auto-fill supplier emails and reduce “missing contact” issues.
+**Tip:** Upload **suppliers.csv** in the sidebar to auto-fill supplier emails.
         """.strip()
     )
 
@@ -1063,7 +1246,6 @@ else:
         mime="text/csv",
     )
 
-    # Email preview + copy buttons (email/subject/body)
     if "supplier_name" in followups.columns and "body" in followups.columns and len(followups) > 0:
         st.divider()
         st.markdown("### Email preview (select a supplier)")
@@ -1103,7 +1285,6 @@ else:
 # -------------------------------
 st.divider()
 st.subheader("Order-Level Rollup (One row per order)")
-
 st.dataframe(order_rollup, use_container_width=True, height=320)
 st.download_button(
     "Download Order Rollup CSV",
@@ -1117,7 +1298,6 @@ st.download_button(
 # -------------------------------
 st.divider()
 st.subheader("All Order Lines (Normalized + Status)")
-
 st.dataframe(line_status_df, use_container_width=True, height=380)
 st.download_button(
     "Download Line Status CSV",
@@ -1127,4 +1307,3 @@ st.download_button(
 )
 
 st.caption("MVP note: This version uses CSV uploads. Integrations + automation can be added after early-user feedback.")
-
