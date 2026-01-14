@@ -1,0 +1,21 @@
+dropship-hub/
+│
+├── app.py                 # Streamlit app
+├── explain.py             # AI explanations (safe fallback)
+├── normalize.py           # CSV normalization
+├── reconcile.py           # Core business logic
+├── schemas.py             # Canonical schemas
+├── requirements.txt
+│
+├── data/
+│   ├── raw_orders.csv     # demo
+│   ├── raw_shipments.csv  # demo
+│   ├── raw_tracking.csv   # demo
+│
+├── templates/
+│   ├── shipments_template.csv
+│   ├── tracking_template.csv
+│   ├── suppliers_template.csv
+│
+├── README.md
+└── LICENSE
