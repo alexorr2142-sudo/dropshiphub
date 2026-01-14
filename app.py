@@ -42,6 +42,7 @@ from ui.actions_ui import render_daily_action_list
 from ui.customer_impact_ui import render_customer_impact_view
 from ui.supplier_accountability_ui import render_supplier_accountability
 from ui.comms_pack_ui import render_comms_pack_download
+from ui.kpi_trends_ui import render_kpi_trends
 
 
 # -------------------------------
@@ -66,6 +67,7 @@ def _startup_sanity_check():
         "core/customer_impact.py",
         "core/supplier_accountability.py",
         "core/comms_pack.py",
+        "core/kpi_trends.py",
         "ui/__init__.py",
         "ui/auth.py",
         "ui/demo.py",
@@ -76,6 +78,7 @@ def _startup_sanity_check():
         "ui/customer_impact_ui.py",
         "ui/supplier_accountability_ui.py",
         "ui/comms_pack_ui.py",
+        "ui/kpi_trends_ui.py",
     ]
     missing = [rel for rel in required if not (ROOT / rel).exists()]
     if missing:
@@ -180,12 +183,13 @@ with st.expander("Onboarding checklist", expanded=True):
 3. Upload **Shipments CSV** (supplier / agent export)  
 4. (Optional) Upload **Tracking CSV**  
 5. Click **Run reconciliation** (this refreshes outputs)  
-6. Review **Daily Action List** (what to do today)  
-7. Review **Customer Impact View** (draft customer messages)  
-8. Review **Bulk Comms Pack** (download today’s comms as ZIP)  
-9. Review **Supplier Accountability Mode** (supplier performance note)  
-10. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
-11. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
+6. Click **Save this run** (daily) to build trend history  
+7. Review **Daily Action List** (what to do today)  
+8. Review **Customer Impact View** (draft customer messages)  
+9. Review **Bulk Comms Pack** (download today’s comms as ZIP)  
+10. Review **Supplier Accountability Mode** (supplier performance note)  
+11. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
+12. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
         """.strip()
     )
 
@@ -423,6 +427,15 @@ k2.metric("% Shipped/Delivered", f"{kpis.get('pct_shipped_or_delivered', 0)}%")
 k3.metric("% Delivered", f"{kpis.get('pct_delivered', 0)}%")
 k4.metric("% Unshipped", f"{kpis.get('pct_unshipped', 0)}%")
 k5.metric("% Late Unshipped", f"{kpis.get('pct_late_unshipped', 0)}%")
+
+# -------------------------------
+# KPI Trends Over Time (Feature #5)
+# -------------------------------
+render_kpi_trends(
+    workspaces_dir=WORKSPACES_DIR,
+    account_id=account_id,
+    store_id=store_id,
+)
 
 # -------------------------------
 # Daily Action List (Feature #1)
