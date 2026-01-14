@@ -29,12 +29,14 @@ from core.styling import add_urgency_column, style_exceptions_table, copy_button
 from core.scorecards import build_supplier_scorecard_from_run
 from core.ops_pack import make_daily_ops_pack_bytes
 from core.suppliers import enrich_followups_with_suppliers, add_missing_supplier_contact_exceptions
+from core.actions import build_daily_action_list
 
 from ui.auth import early_access_gate, require_email_access_gate
 from ui.sidebar import render_sidebar_context
 from ui.demo import ensure_demo_state, render_demo_editor, get_active_raw_inputs
 from ui.templates import render_template_downloads
 from ui.workspaces_ui import render_workspaces_sidebar_and_maybe_override_outputs
+from ui.actions_ui import render_daily_action_list
 
 
 # -------------------------------
@@ -55,12 +57,14 @@ def _startup_sanity_check():
         "core/workspaces.py",
         "core/suppliers.py",
         "core/scorecards.py",
+        "core/actions.py",
         "ui/__init__.py",
         "ui/auth.py",
         "ui/demo.py",
         "ui/templates.py",
         "ui/sidebar.py",
         "ui/workspaces_ui.py",
+        "ui/actions_ui.py",
     ]
     missing = [rel for rel in required if not (ROOT / rel).exists()]
     if missing:
@@ -86,7 +90,6 @@ def _df_signature(df: pd.DataFrame) -> str:
         return f"not_df:{type(df)}"
     shape = df.shape
     cols = ",".join(map(str, df.columns.tolist()))
-    # sample for content sensitivity
     sample = df.head(50).copy()
     tail = df.tail(50).copy()
     try:
@@ -94,7 +97,6 @@ def _df_signature(df: pd.DataFrame) -> str:
         h2 = pd.util.hash_pandas_object(tail, index=True).sum()
         return f"{shape}|{cols}|{int(h1)}|{int(h2)}"
     except Exception:
-        # fallback if hashing fails due to weird dtypes
         return f"{shape}|{cols}"
 
 
@@ -116,7 +118,6 @@ def _invalidate_results_if_inputs_changed(sig_now: str):
         return
 
     if sig_now != prev:
-        # Inputs changed -> cached results are stale
         st.session_state["inputs_sig"] = sig_now
         st.session_state["run_requested"] = False
         st.session_state.pop("results_bundle", None)
@@ -163,8 +164,9 @@ with st.expander("Onboarding checklist", expanded=True):
 3. Upload **Shipments CSV** (supplier / agent export)  
 4. (Optional) Upload **Tracking CSV**  
 5. Click **Run reconciliation** (this refreshes outputs)  
-6. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
-7. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
+6. Review **Daily Action List** (what to do today)  
+7. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
+8. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
         """.strip()
     )
 
@@ -214,7 +216,6 @@ if "run_requested" not in st.session_state:
 if "results_bundle" not in st.session_state:
     st.session_state["results_bundle"] = None
 
-# If inputs change (demo edits/uploads), invalidate cached results
 sig_now = _inputs_signature(raw_orders, raw_shipments, raw_tracking, demo_mode=demo_mode)
 _invalidate_results_if_inputs_changed(sig_now)
 
@@ -225,7 +226,6 @@ r1, r2, r3 = st.columns([1, 1, 3])
 with r1:
     if st.button("▶ Run reconciliation", use_container_width=True, key="btn_run_recon"):
         st.session_state["run_requested"] = True
-        # clearing bundle forces a clean recompute even if button pressed twice
         st.session_state["results_bundle"] = None
 
 with r2:
@@ -404,6 +404,12 @@ k2.metric("% Shipped/Delivered", f"{kpis.get('pct_shipped_or_delivered', 0)}%")
 k3.metric("% Delivered", f"{kpis.get('pct_delivered', 0)}%")
 k4.metric("% Unshipped", f"{kpis.get('pct_unshipped', 0)}%")
 k5.metric("% Late Unshipped", f"{kpis.get('pct_late_unshipped', 0)}%")
+
+# -------------------------------
+# NEW: Daily Action List (Feature #1)
+# -------------------------------
+actions = build_daily_action_list(exceptions=exceptions, followups=followups, max_items=10)
+render_daily_action_list(actions)
 
 # -------------------------------
 # Exceptions Queue
