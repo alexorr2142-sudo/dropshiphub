@@ -12,7 +12,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 # --- Local modules (your repo files) ---
-# If these imports fail, Streamlit will crash—so we wrap with a helpful message.
 try:
     from normalize import normalize_orders, normalize_shipments, normalize_tracking
     from reconcile import reconcile_all
@@ -29,10 +28,6 @@ except Exception as e:
 # Clipboard / Copy buttons
 # -------------------------------
 def copy_button(text: str, label: str, key: str):
-    """
-    Renders a button that copies `text` to clipboard using the browser clipboard API.
-    Uses a unique `key` to avoid DOM id collisions.
-    """
     safe_text = (
         str(text)
         .replace("\\", "\\\\")
@@ -70,10 +65,6 @@ def copy_button(text: str, label: str, key: str):
 # Exceptions urgency + styling (Step B)
 # -------------------------------
 def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds an 'Urgency' column based on issue_type/explanation/next_action/customer_risk/line_status.
-    Best-effort and safe (won't crash if columns are missing).
-    """
     df = exceptions_df.copy()
 
     def classify_row(row) -> str:
@@ -82,7 +73,6 @@ def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
         next_action = str(row.get("next_action", "")).lower()
         risk = str(row.get("customer_risk", "")).lower()
         line_status = str(row.get("line_status", "")).lower()
-
         blob = " ".join([issue_type, explanation, next_action, risk, line_status])
 
         critical_terms = [
@@ -103,7 +93,7 @@ def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
         if any(t in blob for t in high_terms):
             return "High"
 
-        medium_terms = ["verify", "check", "confirm", "format", "invalid", "missing"]
+        medium_terms = ["verify", "check", "confirm", "format", "invalid", "missing", "contact"]
         if any(t in blob for t in medium_terms):
             return "Medium"
 
@@ -138,6 +128,7 @@ def style_exceptions_table(df: pd.DataFrame):
 
 # -------------------------------
 # Basic auth helpers (Step C)
+# (You want "accept all emails" -> keep allowlist empty)
 # -------------------------------
 def _parse_allowed_emails_from_env() -> list[str]:
     raw = os.getenv("DSH_ALLOWED_EMAILS", "").strip()
@@ -147,11 +138,6 @@ def _parse_allowed_emails_from_env() -> list[str]:
 
 
 def get_allowed_emails() -> list[str]:
-    """
-    Reads allowed emails from either Streamlit secrets or env var:
-      - st.secrets["ALLOWED_EMAILS"] = ["a@x.com", "b@y.com"]
-      - env: DSH_ALLOWED_EMAILS="a@x.com,b@y.com"
-    """
     allowed = []
     try:
         allowed = st.secrets.get("ALLOWED_EMAILS", [])
@@ -166,21 +152,21 @@ def get_allowed_emails() -> list[str]:
 
 def require_email_access_gate():
     st.subheader("Access")
-    email = st.text_input("Work email", key="auth_email").strip().lower()
+    _ = st.text_input("Work email", key="auth_email").strip().lower()
 
     allowed = get_allowed_emails()
     if allowed:
-        if not email:
+        if not _:
             st.info("Enter your work email to continue.")
             st.stop()
-        if email not in allowed:
+        if _ not in allowed:
             st.error("This email is not authorized for early access.")
             st.caption("Ask the admin to add your email to the allowlist.")
             st.stop()
         st.success("Email verified ✅")
     else:
-        st.warning("No email allowlist configured. Anyone with the access code can enter.")
-        st.caption("To enable email auth: set Streamlit secret ALLOWED_EMAILS or env var DSH_ALLOWED_EMAILS.")
+        # Accept all emails (your requested behavior)
+        st.caption("Email verification is currently disabled (accepting all emails).")
 
 
 # -------------------------------
@@ -201,11 +187,6 @@ def workspace_root(workspaces_dir: Path, account_id: str, store_id: str) -> Path
 
 
 def list_runs(ws_root: Path) -> list[dict]:
-    """
-    Returns list of runs:
-      {workspace_name, run_id, path, created_at, meta}
-    Sorted newest first.
-    """
     if not ws_root.exists():
         return []
 
@@ -226,7 +207,6 @@ def list_runs(ws_root: Path) -> list[dict]:
                     meta = {}
 
             created_at = meta.get("created_at", run_dir.name)
-
             runs.append(
                 {
                     "workspace_name": workspace_dir.name,
@@ -255,6 +235,7 @@ def save_run(
     order_rollup: pd.DataFrame,
     line_status_df: pd.DataFrame,
     kpis: dict,
+    suppliers_df: pd.DataFrame,
 ) -> Path:
     workspace_name = _safe_slug(workspace_name)
     run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
@@ -267,10 +248,14 @@ def save_run(
     order_rollup.to_csv(run_dir / "order_rollup.csv", index=False)
     line_status_df.to_csv(run_dir / "line_status.csv", index=False)
 
-    # Inputs (useful for debug / repeatability)
+    # Inputs (debug/repeatability)
     orders.to_csv(run_dir / "orders_normalized.csv", index=False)
     shipments.to_csv(run_dir / "shipments_normalized.csv", index=False)
     tracking.to_csv(run_dir / "tracking_normalized.csv", index=False)
+
+    # Supplier CRM snapshot
+    if suppliers_df is not None and not suppliers_df.empty:
+        suppliers_df.to_csv(run_dir / "suppliers.csv", index=False)
 
     meta = {
         "created_at": run_id,
@@ -287,6 +272,7 @@ def save_run(
             "followups": int(len(followups)),
             "order_rollup": int(len(order_rollup)),
             "line_status": int(len(line_status_df)),
+            "suppliers": int(len(suppliers_df)) if suppliers_df is not None else 0,
         },
     }
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -311,10 +297,10 @@ def load_run(run_dir: Path) -> dict:
     out["followups"] = _read_csv("followups.csv")
     out["order_rollup"] = _read_csv("order_rollup.csv")
     out["line_status_df"] = _read_csv("line_status.csv")
-
     out["orders"] = _read_csv("orders_normalized.csv")
     out["shipments"] = _read_csv("shipments_normalized.csv")
     out["tracking"] = _read_csv("tracking_normalized.csv")
+    out["suppliers_df"] = _read_csv("suppliers.csv")
     return out
 
 
@@ -334,15 +320,11 @@ def delete_run_dir(run_dir: Path) -> None:
 
 
 def build_run_history_df(runs: list[dict]) -> pd.DataFrame:
-    """
-    Step 7.5: run history table (workspace/date/counts + a couple KPIs if present)
-    """
     rows = []
     for r in runs:
         meta = r.get("meta", {}) or {}
         counts = meta.get("row_counts", {}) or {}
         kpis = meta.get("kpis", {}) or {}
-
         rows.append(
             {
                 "workspace": r.get("workspace_name", ""),
@@ -350,17 +332,158 @@ def build_run_history_df(runs: list[dict]) -> pd.DataFrame:
                 "created_at": meta.get("created_at", r.get("created_at", "")),
                 "exceptions": counts.get("exceptions", ""),
                 "followups": counts.get("followups", ""),
-                "orders": counts.get("orders", ""),
-                "shipments": counts.get("shipments", ""),
+                "suppliers": counts.get("suppliers", ""),
                 "pct_unshipped": kpis.get("pct_unshipped", ""),
                 "pct_late_unshipped": kpis.get("pct_late_unshipped", ""),
             }
         )
-
     df = pd.DataFrame(rows)
     if not df.empty and "created_at" in df.columns:
         df = df.sort_values("created_at", ascending=False)
     return df
+
+
+# -------------------------------
+# Supplier CRM (Step 8)
+# -------------------------------
+def normalize_supplier_key(s: str) -> str:
+    return (str(s) if s is not None else "").strip().lower()
+
+
+def suppliers_path(suppliers_dir: Path, account_id: str, store_id: str) -> Path:
+    return suppliers_dir / _safe_slug(account_id) / _safe_slug(store_id) / "suppliers.csv"
+
+
+def load_suppliers(suppliers_dir: Path, account_id: str, store_id: str) -> pd.DataFrame:
+    p = suppliers_path(suppliers_dir, account_id, store_id)
+    if p.exists():
+        try:
+            df = pd.read_csv(p)
+            return df
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+
+def save_suppliers(suppliers_dir: Path, account_id: str, store_id: str, df: pd.DataFrame) -> Path:
+    p = suppliers_path(suppliers_dir, account_id, store_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(p, index=False)
+    return p
+
+
+def style_supplier_table(df: pd.DataFrame):
+    # highlight missing emails
+    if "supplier_email" not in df.columns:
+        return df.style
+
+    def _row_style(row):
+        email = str(row.get("supplier_email", "")).strip()
+        if email == "" or email.lower() in ["nan", "none"]:
+            return ["background-color: #fff1cc;"] * len(row)
+        return [""] * len(row)
+
+    return df.style.apply(_row_style, axis=1)
+
+
+def enrich_followups_with_suppliers(followups: pd.DataFrame, suppliers_df: pd.DataFrame) -> pd.DataFrame:
+    if followups is None or followups.empty or suppliers_df is None or suppliers_df.empty:
+        return followups
+
+    f = followups.copy()
+    s = suppliers_df.copy()
+
+    if "supplier_name" not in f.columns or "supplier_name" not in s.columns:
+        return followups
+
+    # normalize key
+    f["_supplier_key"] = f["supplier_name"].map(normalize_supplier_key)
+    s["_supplier_key"] = s["supplier_name"].map(normalize_supplier_key)
+
+    # keep only relevant columns
+    cols = ["_supplier_key"]
+    for c in ["supplier_email", "supplier_channel", "language", "timezone"]:
+        if c in s.columns:
+            cols.append(c)
+    s2 = s[cols].drop_duplicates(subset=["_supplier_key"])
+
+    merged = f.merge(s2, on="_supplier_key", how="left", suffixes=("", "_crm"))
+
+    # Fill/overwrite supplier_email if missing
+    if "supplier_email" in f.columns:
+        merged["supplier_email"] = merged["supplier_email"].fillna("")
+        merged["supplier_email"] = merged["supplier_email"].where(
+            merged["supplier_email"].astype(str).str.strip() != "",
+            merged.get("supplier_email_crm", "").fillna(""),
+        )
+    else:
+        merged["supplier_email"] = merged.get("supplier_email_crm", "").fillna("")
+
+    # bring other CRM fields if not already present
+    for c in ["supplier_channel", "language", "timezone"]:
+        if c in merged.columns:
+            continue
+        if f"{c}_crm" in merged.columns:
+            merged[c] = merged[f"{c}_crm"]
+
+    # cleanup
+    drop_cols = [c for c in merged.columns if c.endswith("_crm")] + ["_supplier_key"]
+    merged = merged.drop(columns=[c for c in drop_cols if c in merged.columns])
+
+    return merged
+
+
+def add_missing_supplier_contact_exceptions(exceptions: pd.DataFrame, followups: pd.DataFrame) -> pd.DataFrame:
+    """
+    If a supplier needs a follow-up but has no email after CRM merge, create an exception row.
+    """
+    if followups is None or followups.empty:
+        return exceptions
+
+    f = followups.copy()
+
+    if "supplier_name" not in f.columns:
+        return exceptions
+
+    # consider a supplier "needs follow-up" if item_count exists and > 0; otherwise if body exists.
+    needs = pd.Series([True] * len(f))
+    if "item_count" in f.columns:
+        try:
+            needs = f["item_count"].fillna(0).astype(float) > 0
+        except Exception:
+            needs = pd.Series([True] * len(f))
+
+    email = f.get("supplier_email", pd.Series([""] * len(f))).fillna("").astype(str).str.strip()
+    missing = needs & (email == "")
+
+    if missing.sum() == 0:
+        return exceptions
+
+    missing_suppliers = sorted(f.loc[missing, "supplier_name"].dropna().unique().tolist())
+    rows = []
+    for sname in missing_suppliers:
+        rows.append(
+            {
+                "order_id": "",
+                "sku": "",
+                "issue_type": "Missing supplier contact",
+                "customer_country": "",
+                "supplier_name": sname,
+                "quantity_ordered": "",
+                "quantity_shipped": "",
+                "line_status": "",
+                "explanation": "A supplier follow-up is needed, but this supplier has no email saved in the Supplier Directory.",
+                "next_action": "Add supplier_email in Supplier Directory (upload suppliers.csv) or update the CRM row.",
+                "customer_risk": "Medium",
+            }
+        )
+    add_df = pd.DataFrame(rows)
+
+    if exceptions is None or exceptions.empty:
+        return add_df
+
+    # concat with alignment
+    return pd.concat([exceptions, add_df], ignore_index=True, sort=False)
 
 
 # -------------------------------
@@ -382,9 +505,7 @@ if code != ACCESS_CODE:
     st.info("This app is currently in early access. Enter your code to continue.")
     st.stop()
 
-# -------------------------------
-# Step C: Email authentication gate
-# -------------------------------
+# Email gate (accept-all mode)
 require_email_access_gate()
 
 # -------------------------------
@@ -393,7 +514,7 @@ require_email_access_gate()
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 
-# Ensure workspaces folder exists (and isn't accidentally a file)
+# Ensure workspaces dir exists (and isn't a file)
 WORKSPACES_DIR = DATA_DIR / "workspaces"
 if WORKSPACES_DIR.exists() and not WORKSPACES_DIR.is_dir():
     st.error(
@@ -403,21 +524,32 @@ if WORKSPACES_DIR.exists() and not WORKSPACES_DIR.is_dir():
     st.stop()
 WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
 
+# Ensure suppliers dir exists (and isn't a file)
+SUPPLIERS_DIR = DATA_DIR / "suppliers"
+if SUPPLIERS_DIR.exists() and not SUPPLIERS_DIR.is_dir():
+    st.error(
+        "Supplier storage path is invalid: `data/suppliers` exists but is a FILE, not a folder.\n\n"
+        "Fix: delete or rename `data/suppliers` in your repo, then redeploy."
+    )
+    st.stop()
+SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
+
 # -------------------------------
-# Sidebar: plan + tenant + defaults
+# Sidebar: plan + tenant + defaults + Supplier CRM
 # -------------------------------
 with st.sidebar:
     st.header("Plan")
-    plan = st.selectbox("Current plan", ["Early Access (Free)", "Pro", "Team"], index=0)
+    _plan = st.selectbox("Current plan", ["Early Access (Free)", "Pro", "Team"], index=0)
     with st.expander("Upgrade / Pricing (placeholder)", expanded=False):
         st.markdown(
             """
 **Early Access (Free)**
 - CSV uploads
 - Exceptions + supplier follow-ups
+- Supplier Directory (CRM)
 
 **Pro**
-- Saved workspaces
+- Saved workspaces + run history
 - Supplier scorecards (coming soon)
 - Automations (coming soon)
 
@@ -445,7 +577,44 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption("Tip: Click demo to see the workflow before uploading files.")
+    st.header("Supplier Directory (CRM)")
+
+    # Load any previously saved suppliers for this tenant
+    if "suppliers_df" not in st.session_state:
+        st.session_state["suppliers_df"] = load_suppliers(SUPPLIERS_DIR, account_id, store_id)
+
+    f_suppliers = st.file_uploader("Upload suppliers.csv", type=["csv"], key="suppliers_uploader")
+    if f_suppliers is not None:
+        try:
+            uploaded_suppliers = pd.read_csv(f_suppliers)
+            st.session_state["suppliers_df"] = uploaded_suppliers
+            p = save_suppliers(SUPPLIERS_DIR, account_id, store_id, uploaded_suppliers)
+            st.success(f"Saved ✅ {p.as_posix()}")
+        except Exception as e:
+            st.error("Failed to read suppliers CSV.")
+            st.code(str(e))
+
+    with st.expander("View Supplier Directory", expanded=False):
+        suppliers_df = st.session_state.get("suppliers_df", pd.DataFrame())
+        if suppliers_df is None or suppliers_df.empty:
+            st.caption("No supplier directory loaded yet. Upload suppliers.csv to auto-fill follow-up emails.")
+        else:
+            show_cols = [c for c in ["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"] if c in suppliers_df.columns]
+            if not show_cols:
+                st.dataframe(suppliers_df, use_container_width=True, height=220)
+            else:
+                st.dataframe(style_supplier_table(suppliers_df[show_cols]), use_container_width=True, height=220)
+
+            # quick stats
+            if "supplier_email" in suppliers_df.columns:
+                missing_emails = suppliers_df["supplier_email"].fillna("").astype(str).str.strip().eq("").sum()
+                st.caption(f"Missing supplier_email: {int(missing_emails)} row(s) (highlighted)")
+
+    st.divider()
+    st.caption("Tip: Upload suppliers.csv once per account/store to auto-fill follow-up emails.")
+
+# Pull into local variable after sidebar is defined
+suppliers_df = st.session_state.get("suppliers_df", pd.DataFrame())
 
 # -------------------------------
 # Onboarding checklist
@@ -459,6 +628,7 @@ with st.expander("Onboarding checklist", expanded=True):
 3. Upload **Shipments CSV** (supplier / agent export)  
 4. (Optional) Upload **Tracking CSV**  
 5. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
+6. (Optional) Upload **suppliers.csv** to auto-fill supplier emails and channels  
         """.strip()
     )
 
@@ -620,11 +790,17 @@ except Exception as e:
     st.code(str(e))
     st.stop()
 
-# AI explanations (safe fallback if no API key)
+# AI explanations (safe fallback)
 try:
     exceptions = enhance_explanations(exceptions)
 except Exception:
     pass
+
+# -------------------------------
+# Step 8: Enrich followups + add missing supplier contact exceptions
+# -------------------------------
+followups = enrich_followups_with_suppliers(followups, suppliers_df)
+exceptions = add_missing_supplier_contact_exceptions(exceptions, followups)
 
 # -------------------------------
 # Step 7 + 7.5: Workspaces UI (Save/Load/History/Delete)
@@ -656,6 +832,7 @@ with st.sidebar:
             order_rollup=order_rollup,
             line_status_df=line_status_df,
             kpis=kpis,
+            suppliers_df=suppliers_df,
         )
         st.success(f"Saved ✅ {workspace_name}/{run_dir.name}")
         st.session_state["loaded_run"] = str(run_dir)
@@ -720,13 +897,19 @@ with st.sidebar:
     else:
         st.caption("No saved runs yet. Click **Save this run** to create your first run history entry.")
 
-# If a run is loaded, override the outputs used by the UI below
+# If a run is loaded, override the outputs used by the UI below (+ suppliers snapshot if present)
 if st.session_state.get("loaded_run"):
     loaded = load_run(Path(st.session_state["loaded_run"]))
     exceptions = loaded.get("exceptions", exceptions)
     followups = loaded.get("followups", followups)
     order_rollup = loaded.get("order_rollup", order_rollup)
     line_status_df = loaded.get("line_status_df", line_status_df)
+
+    loaded_suppliers = loaded.get("suppliers_df", pd.DataFrame())
+    if loaded_suppliers is not None and not loaded_suppliers.empty:
+        suppliers_df = loaded_suppliers
+        st.session_state["suppliers_df"] = loaded_suppliers  # keep UI consistent
+
     meta = loaded.get("meta", {}) or {}
     st.info(f"Viewing saved run: **{meta.get('workspace_name','')} / {meta.get('created_at','')}**")
 
@@ -768,7 +951,7 @@ with st.expander("What am I looking at?", expanded=True):
 - One row per order so you can quickly see **overall status**.
 - Use this view for customer support updates.
 
-**Tip:** Click **Try demo data** to understand the flow in 30 seconds before uploading your own files.
+**Tip:** Upload **suppliers.csv** in the sidebar to auto-fill supplier emails and reduce “missing contact” issues.
         """.strip()
     )
 
@@ -944,3 +1127,4 @@ st.download_button(
 )
 
 st.caption("MVP note: This version uses CSV uploads. Integrations + automation can be added after early-user feedback.")
+
