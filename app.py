@@ -71,7 +71,7 @@ def copy_button(text: str, label: str, key: str):
 # -------------------------------
 def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds an 'Urgency' column based on issue_type/explanation/next_action/customer_risk.
+    Adds an 'Urgency' column based on issue_type/explanation/next_action/customer_risk/line_status.
     Best-effort and safe (won't crash if columns are missing).
     """
     df = exceptions_df.copy()
@@ -196,8 +196,8 @@ def _safe_slug(s: str) -> str:
     return out[:60] if out else "workspace"
 
 
-def workspace_root(data_dir: Path, account_id: str, store_id: str) -> Path:
-    return data_dir / "workspaces" / _safe_slug(account_id) / _safe_slug(store_id)
+def workspace_root(workspaces_dir: Path, account_id: str, store_id: str) -> Path:
+    return workspaces_dir / _safe_slug(account_id) / _safe_slug(store_id)
 
 
 def list_runs(ws_root: Path) -> list[dict]:
@@ -392,7 +392,16 @@ require_email_access_gate()
 # -------------------------------
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
-(DATA_DIR / "workspaces").mkdir(parents=True, exist_ok=True)  # ensure exists for Step 7
+
+# Ensure workspaces folder exists (and isn't accidentally a file)
+WORKSPACES_DIR = DATA_DIR / "workspaces"
+if WORKSPACES_DIR.exists() and not WORKSPACES_DIR.is_dir():
+    st.error(
+        "Workspace storage path is invalid: `data/workspaces` exists but is a FILE, not a folder.\n\n"
+        "Fix: delete or rename `data/workspaces` in your repo, then redeploy."
+    )
+    st.stop()
+WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
 
 # -------------------------------
 # Sidebar: plan + tenant + defaults
@@ -620,7 +629,7 @@ except Exception:
 # -------------------------------
 # Step 7 + 7.5: Workspaces UI (Save/Load/History/Delete)
 # -------------------------------
-ws_root = workspace_root(DATA_DIR, account_id, store_id)
+ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
 ws_root.mkdir(parents=True, exist_ok=True)
 
 if "loaded_run" not in st.session_state:
@@ -632,7 +641,6 @@ with st.sidebar:
 
     workspace_name = st.text_input("Workspace name", value="default", key="ws_name")
 
-    # Save current run
     if st.button("💾 Save this run", key="btn_save_run"):
         run_dir = save_run(
             ws_root=ws_root,
@@ -654,7 +662,6 @@ with st.sidebar:
 
     runs = list_runs(ws_root)
 
-    # Load previous run
     if runs:
         run_labels = [
             f"{r['workspace_name']} / {r['run_id']}  (exceptions: {r.get('meta', {}).get('row_counts', {}).get('exceptions', '?')})"
@@ -674,28 +681,19 @@ with st.sidebar:
                 st.success("Loaded ✅")
         with cL2:
             if st.session_state["loaded_run"]:
-                try:
-                    run_dir = Path(st.session_state["loaded_run"])
-                    zip_bytes = make_run_zip_bytes(run_dir)
-                    st.download_button(
-                        "⬇️ Run Pack",
-                        data=zip_bytes,
-                        file_name=f"runpack_{run_dir.parent.name}_{run_dir.name}.zip",
-                        mime="application/zip",
-                        key="btn_zip_runpack",
-                    )
-                except Exception:
-                    st.caption("Could not build ZIP for the loaded run.")
+                run_dir = Path(st.session_state["loaded_run"])
+                zip_bytes = make_run_zip_bytes(run_dir)
+                st.download_button(
+                    "⬇️ Run Pack",
+                    data=zip_bytes,
+                    file_name=f"runpack_{run_dir.parent.name}_{run_dir.name}.zip",
+                    mime="application/zip",
+                    key="btn_zip_runpack",
+                )
 
-        # -------------------------------
-        # Step 7.5: Run history + delete
-        # -------------------------------
         with st.expander("Run history (7.5)", expanded=False):
             history_df = build_run_history_df(runs)
-            if history_df.empty:
-                st.info("No saved runs yet.")
-            else:
-                st.dataframe(history_df, use_container_width=True, height=220)
+            st.dataframe(history_df, use_container_width=True, height=220)
 
             st.divider()
             st.markdown("**Delete a saved run**")
@@ -714,7 +712,6 @@ with st.sidebar:
                 loaded_path = st.session_state.get("loaded_run")
                 delete_run_dir(target)
 
-                # If we deleted the loaded run, clear it
                 if loaded_path and Path(loaded_path) == target:
                     st.session_state["loaded_run"] = None
 
@@ -883,7 +880,7 @@ else:
         mime="text/csv",
     )
 
-    # Email preview + copy
+    # Email preview + copy buttons (email/subject/body)
     if "supplier_name" in followups.columns and "body" in followups.columns and len(followups) > 0:
         st.divider()
         st.markdown("### Email preview (select a supplier)")
