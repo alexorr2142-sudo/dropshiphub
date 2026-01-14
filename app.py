@@ -1,7 +1,13 @@
 # app.py
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import os
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -19,7 +25,7 @@ except Exception as e:
     st.stop()
 
 from core.paths import init_paths
-from core.styling import add_urgency_column
+from core.styling import add_urgency_column, style_exceptions_table, copy_button
 from core.scorecards import build_supplier_scorecard_from_run
 from core.ops_pack import make_daily_ops_pack_bytes
 from core.suppliers import enrich_followups_with_suppliers, add_missing_supplier_contact_exceptions
@@ -36,6 +42,39 @@ from ui.workspaces_ui import render_workspaces_sidebar_and_maybe_override_output
 # -------------------------------
 st.set_page_config(page_title="Dropship Hub", layout="wide")
 
+
+# -------------------------------
+# Startup sanity check (prevents redacted ModuleNotFoundError)
+# -------------------------------
+def _startup_sanity_check():
+    required = [
+        "core/__init__.py",
+        "core/paths.py",
+        "core/styling.py",
+        "core/ops_pack.py",
+        "core/workspaces.py",
+        "core/suppliers.py",
+        "core/scorecards.py",
+        "ui/__init__.py",
+        "ui/auth.py",
+        "ui/demo.py",
+        "ui/templates.py",
+        "ui/sidebar.py",
+        "ui/workspaces_ui.py",
+    ]
+    missing = []
+    for rel in required:
+        if not (ROOT / rel).exists():
+            missing.append(rel)
+
+    if missing:
+        st.error("Missing required app files (repo structure issue).")
+        st.code("\n".join(missing))
+        st.stop()
+
+
+_startup_sanity_check()
+
 # -------------------------------
 # Early Access Gate
 # -------------------------------
@@ -44,12 +83,12 @@ early_access_gate(ACCESS_CODE)
 require_email_access_gate()
 
 # -------------------------------
-# Paths (data/workspaces, data/suppliers)
+# Paths
 # -------------------------------
 BASE_DIR, DATA_DIR, WORKSPACES_DIR, SUPPLIERS_DIR = init_paths(Path(__file__).parent)
 
 # -------------------------------
-# Sidebar (tenant, defaults, demo toggle, supplier CRM upload/view)
+# Sidebar
 # -------------------------------
 ctx = render_sidebar_context(
     data_dir=DATA_DIR,
@@ -82,7 +121,7 @@ with st.expander("Onboarding checklist", expanded=True):
     )
 
 # -------------------------------
-# Demo Mode (sticky) editor
+# Demo Mode (sticky)
 # -------------------------------
 ensure_demo_state(DATA_DIR)
 st.subheader("Start here")
@@ -166,7 +205,7 @@ try:
 except Exception:
     pass
 
-# Step 8: enrich followups with CRM + add "missing supplier contact" exceptions
+# Enrich followups with CRM + add missing supplier contact exceptions
 followups = enrich_followups_with_suppliers(followups, suppliers_df)
 exceptions = add_missing_supplier_contact_exceptions(exceptions, followups)
 
@@ -208,12 +247,11 @@ exceptions, followups, order_rollup, line_status_df, suppliers_df = render_works
     suppliers_df=suppliers_df,
 )
 
-# Recompute urgency/scorecard if a saved run was loaded (override changed)
+# Recompute urgency/scorecard if saved run loaded
 if exceptions is not None and not exceptions.empty and "Urgency" not in exceptions.columns:
     exceptions = add_urgency_column(exceptions)
 scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
 
-# Rebuild ops pack if loaded run changed outputs
 ops_pack_bytes = make_daily_ops_pack_bytes(
     exceptions=exceptions if exceptions is not None else pd.DataFrame(),
     followups=followups if followups is not None else pd.DataFrame(),
@@ -253,36 +291,8 @@ k4.metric("% Unshipped", f"{kpis.get('pct_unshipped', 0)}%")
 k5.metric("% Late Unshipped", f"{kpis.get('pct_late_unshipped', 0)}%")
 
 # -------------------------------
-# What am I looking at?
-# -------------------------------
-st.divider()
-with st.expander("What am I looking at?", expanded=False):
-    st.markdown(
-        """
-### How to use this app (daily workflow)
-
-**1) Start with Ops Triage**
-- Handle **Critical + High** issues first
-
-**2) Start with the Exceptions Queue**
-- These are the **order lines (SKU-level)** that need attention.
-
-**3) Use Supplier Follow-ups**
-- Copy/paste the email text to request **tracking or an updated ship date**.
-
-**4) Use Supplier Scorecards**
-- Find suppliers with high exception rates
-- Track improvement over time (save runs daily)
-
-**Tip:** Download the **Daily Ops Pack ZIP** from the sidebar to store/share the day’s outputs.
-        """.strip()
-    )
-
-# -------------------------------
 # Exceptions Queue
 # -------------------------------
-from core.styling import style_exceptions_table  # local import to keep top clean
-
 st.divider()
 st.subheader("Exceptions Queue (Action this first)")
 
@@ -364,8 +374,6 @@ else:
 # -------------------------------
 # Supplier Follow-ups (with Copy buttons)
 # -------------------------------
-from core.styling import copy_button  # local import to keep top clean
-
 st.divider()
 st.subheader("Supplier Follow-ups (Copy/Paste Ready)")
 
