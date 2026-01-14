@@ -55,6 +55,7 @@ def copy_button(text: str, label: str, key: str):
             setTimeout(() => b.innerText = old, 1200);
           }})
           .catch(() => alert('Copy failed. Your browser may block clipboard access.'));">
+
         {label}
       </button>
     </div>
@@ -129,6 +130,49 @@ def style_exceptions_table(df: pd.DataFrame):
         return [colors.get(u, "")] * len(row)
 
     return df.style.apply(row_style, axis=1)
+
+
+# -------------------------------
+# NEW: Daily Ops Pack ZIP (in-memory)  [Step 4]
+# -------------------------------
+def make_daily_ops_pack_bytes(
+    exceptions: pd.DataFrame,
+    followups: pd.DataFrame,
+    order_rollup: pd.DataFrame,
+    line_status_df: pd.DataFrame,
+    kpis: dict,
+    supplier_scorecards: pd.DataFrame | None = None,
+) -> bytes:
+    """
+    Creates a ZIP in-memory (works on Streamlit Cloud & local).
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("exceptions.csv", (exceptions if exceptions is not None else pd.DataFrame()).to_csv(index=False))
+        z.writestr("supplier_followups.csv", (followups if followups is not None else pd.DataFrame()).to_csv(index=False))
+        z.writestr("order_rollup.csv", (order_rollup if order_rollup is not None else pd.DataFrame()).to_csv(index=False))
+        z.writestr("order_line_status.csv", (line_status_df if line_status_df is not None else pd.DataFrame()).to_csv(index=False))
+
+        if supplier_scorecards is not None and not supplier_scorecards.empty:
+            z.writestr("supplier_scorecards.csv", supplier_scorecards.to_csv(index=False))
+
+        z.writestr("kpis.json", json.dumps(kpis if isinstance(kpis, dict) else {}, indent=2))
+
+        z.writestr(
+            "README.txt",
+            (
+                "Dropship Hub — Daily Ops Pack\n"
+                "Files:\n"
+                " - exceptions.csv: SKU-level issues to action\n"
+                " - supplier_followups.csv: supplier messages to send\n"
+                " - order_rollup.csv: one row per order\n"
+                " - order_line_status.csv: full line-level status\n"
+                " - supplier_scorecards.csv: per-supplier performance snapshot (if available)\n"
+                " - kpis.json: dashboard KPI snapshot\n"
+            ),
+        )
+    buf.seek(0)
+    return buf.read()
 
 
 # -------------------------------
@@ -1035,6 +1079,42 @@ if st.session_state.get("loaded_run"):
     st.info(f"Viewing saved run: **{meta.get('workspace_name','')} / {meta.get('created_at','')}**")
 
 # -------------------------------
+# NEW: Add urgency ONCE for the whole page (triage + tables)
+# -------------------------------
+if exceptions is not None and not exceptions.empty and "Urgency" not in exceptions.columns:
+    exceptions = add_urgency_column(exceptions)
+
+# Precompute scorecard once (used in section + ops pack)
+scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
+
+# -------------------------------
+# NEW: Daily Ops Pack ZIP (sidebar + main)
+# -------------------------------
+pack_date = datetime.now().strftime("%Y%m%d")
+pack_name = f"daily_ops_pack_{pack_date}.zip"
+ops_pack_bytes = make_daily_ops_pack_bytes(
+    exceptions=exceptions if exceptions is not None else pd.DataFrame(),
+    followups=followups if followups is not None else pd.DataFrame(),
+    order_rollup=order_rollup if order_rollup is not None else pd.DataFrame(),
+    line_status_df=line_status_df if line_status_df is not None else pd.DataFrame(),
+    kpis=kpis if isinstance(kpis, dict) else {},
+    supplier_scorecards=scorecard,
+)
+
+with st.sidebar:
+    st.divider()
+    st.header("Daily Ops Pack")
+    st.download_button(
+        "⬇️ Download Daily Ops Pack ZIP",
+        data=ops_pack_bytes,
+        file_name=pack_name,
+        mime="application/zip",
+        use_container_width=True,
+        key="btn_daily_ops_pack_sidebar",
+    )
+    st.caption("Exports: exceptions, followups, rollup, line status, KPIs, scorecards (if available).")
+
+# -------------------------------
 # Dashboard KPIs
 # -------------------------------
 st.divider()
@@ -1048,12 +1128,104 @@ k4.metric("% Unshipped", f"{kpis.get('pct_unshipped', 0)}%")
 k5.metric("% Late Unshipped", f"{kpis.get('pct_late_unshipped', 0)}%")
 
 # -------------------------------
+# NEW: Ops Triage Panel (Step 2)
+# -------------------------------
+st.divider()
+st.subheader("Ops Triage (Start here)")
+
+if exceptions is None or exceptions.empty:
+    st.info("No exceptions found 🎉")
+else:
+    counts = exceptions["Urgency"].value_counts().to_dict() if "Urgency" in exceptions.columns else {}
+    cA, cB, cC, cD = st.columns(4)
+    cA.metric("Critical", int(counts.get("Critical", 0)))
+    cB.metric("High", int(counts.get("High", 0)))
+    cC.metric("Medium", int(counts.get("Medium", 0)))
+    cD.metric("Low", int(counts.get("Low", 0)))
+
+    # One-click focus buttons
+    if "triage_filter" not in st.session_state:
+        st.session_state["triage_filter"] = "All"
+
+    def set_triage(val: str):
+        st.session_state["triage_filter"] = val
+
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        st.button("All", on_click=set_triage, args=("All",), use_container_width=True)
+    with f2:
+        st.button("Critical + High", on_click=set_triage, args=("CriticalHigh",), use_container_width=True)
+    with f3:
+        st.button("Missing tracking", on_click=set_triage, args=("MissingTracking",), use_container_width=True)
+    with f4:
+        st.button("Late unshipped", on_click=set_triage, args=("LateUnshipped",), use_container_width=True)
+
+    triage = exceptions.copy()
+    mode = st.session_state["triage_filter"]
+
+    if mode == "CriticalHigh" and "Urgency" in triage.columns:
+        triage = triage[triage["Urgency"].isin(["Critical", "High"])]
+
+    if mode == "MissingTracking":
+        blob = (
+            triage.get("issue_type", "").astype(str).fillna("") + " " +
+            triage.get("explanation", "").astype(str).fillna("") + " " +
+            triage.get("next_action", "").astype(str).fillna("")
+        ).str.lower()
+        triage = triage[
+            blob.str.contains(
+                "missing tracking|no tracking|tracking missing|invalid tracking",
+                regex=True,
+                na=False,
+            )
+        ]
+
+    if mode == "LateUnshipped":
+        blob = (
+            triage.get("issue_type", "").astype(str).fillna("") + " " +
+            triage.get("explanation", "").astype(str).fillna("") + " " +
+            triage.get("line_status", "").astype(str).fillna("")
+        ).str.lower()
+        triage = triage[blob.str.contains("late unshipped|overdue|past due|late", regex=True, na=False)]
+
+    preferred_cols = [
+        "Urgency",
+        "order_id",
+        "sku",
+        "issue_type",
+        "customer_country",
+        "supplier_name",
+        "quantity_ordered",
+        "quantity_shipped",
+        "line_status",
+        "explanation",
+        "next_action",
+        "customer_risk",
+    ]
+    show_cols = [c for c in preferred_cols if c in triage.columns]
+
+    sort_cols = [c for c in ["Urgency", "order_id"] if c in triage.columns]
+    if sort_cols:
+        triage = triage.sort_values(sort_cols, ascending=True)
+
+    st.markdown("### Top issues to action now")
+    st.dataframe(style_exceptions_table(triage[show_cols].head(10)), use_container_width=True, height=320)
+
+    # Optional: also show main-page ops pack button (some people prefer it in-content)
+    st.download_button(
+        "⬇️ Download Daily Ops Pack ZIP",
+        data=ops_pack_bytes,
+        file_name=pack_name,
+        mime="application/zip",
+        key="btn_daily_ops_pack_main",
+    )
+
+# -------------------------------
 # Supplier Scorecards (NEW)
 # -------------------------------
 st.divider()
 st.subheader("Supplier Scorecards (Performance + Trends)")
 
-scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
 if scorecard is None or scorecard.empty:
     st.info("Scorecards require `supplier_name` in your normalized line status data.")
 else:
@@ -1124,17 +1296,20 @@ with st.expander("What am I looking at?", expanded=False):
         """
 ### How to use this app (daily workflow)
 
-**1) Start with the Exceptions Queue**
+**1) Start with Ops Triage**
+- Handle **Critical + High** issues first
+
+**2) Start with the Exceptions Queue**
 - These are the **order lines (SKU-level)** that need attention.
 
-**2) Use Supplier Follow-ups**
+**3) Use Supplier Follow-ups**
 - Copy/paste the email text to request **tracking or an updated ship date**.
 
-**3) Use Supplier Scorecards**
+**4) Use Supplier Scorecards**
 - Find suppliers with high exception rates
 - Track improvement over time (save runs daily)
 
-**Tip:** Upload **suppliers.csv** in the sidebar to auto-fill supplier emails.
+**Tip:** Download the **Daily Ops Pack ZIP** from the sidebar to store/share the day’s outputs.
         """.strip()
     )
 
@@ -1147,8 +1322,6 @@ st.subheader("Exceptions Queue (Action this first)")
 if exceptions is None or exceptions.empty:
     st.info("No exceptions found 🎉")
 else:
-    exceptions = add_urgency_column(exceptions)
-
     fcol1, fcol2, fcol3, fcol4 = st.columns(4)
 
     with fcol1:
