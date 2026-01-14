@@ -20,6 +20,9 @@ except Exception as e:
     st.stop()
 
 
+# -------------------------------
+# Clipboard / Copy buttons
+# -------------------------------
 def copy_button(text: str, label: str, key: str):
     """
     Renders a button that copies `text` to clipboard using the browser clipboard API.
@@ -60,64 +63,61 @@ def copy_button(text: str, label: str, key: str):
 
 
 # -------------------------------
-# NEW: Exceptions urgency + styling (Step B)
+# Exceptions urgency + styling (Step B)
 # -------------------------------
 def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds an 'Urgency' column based on issue_type/explanation/next_action/customer_risk.
-    This is best-effort and safe (won't crash if columns are missing).
+    Best-effort and safe (won't crash if columns are missing).
     """
     df = exceptions_df.copy()
 
-    # Pick a text column to classify from (best effort)
-    # We'll combine several columns if present.
     def classify_row(row) -> str:
         issue_type = str(row.get("issue_type", "")).lower()
         explanation = str(row.get("explanation", "")).lower()
         next_action = str(row.get("next_action", "")).lower()
         risk = str(row.get("customer_risk", "")).lower()
+        line_status = str(row.get("line_status", "")).lower()
 
-        blob = " ".join([issue_type, explanation, next_action, risk])
+        blob = " ".join([issue_type, explanation, next_action, risk, line_status])
 
-        # Critical signals
+        # Critical
         critical_terms = [
-            "late unshipped", "late", "past due", "overdue",
-            "address missing", "missing address",
-            "missing tracking", "no tracking",
-            "carrier exception", "exception", "returned to sender",
-            "lost", "stuck", "seized"
+            "late", "past due", "overdue", "late unshipped",
+            "missing tracking", "no tracking", "tracking missing",
+            "carrier exception", "exception", "lost", "stuck", "seized",
+            "returned to sender", "address missing", "missing address",
         ]
         if any(t in blob for t in critical_terms):
             return "Critical"
 
-        # High signals
+        # High
         high_terms = [
             "partial", "partial shipment",
             "mismatch", "quantity mismatch",
             "invalid tracking", "tracking invalid",
             "carrier unknown", "unknown carrier",
-            "needs follow up", "follow-up", "follow up"
         ]
         if any(t in blob for t in high_terms):
             return "High"
 
-        # Medium signals
-        med_terms = ["verify", "check", "confirm", "format", "invalid", "missing"]
-        if any(t in blob for t in med_terms):
+        # Medium
+        medium_terms = ["verify", "check", "confirm", "format", "invalid", "missing"]
+        if any(t in blob for t in medium_terms):
             return "Medium"
 
         return "Low"
 
     df["Urgency"] = df.apply(classify_row, axis=1)
-
-    # Order for sorting
-    order = ["Critical", "High", "Medium", "Low"]
-    df["Urgency"] = pd.Categorical(df["Urgency"], categories=order, ordered=True)
-
+    df["Urgency"] = pd.Categorical(
+        df["Urgency"],
+        categories=["Critical", "High", "Medium", "Low"],
+        ordered=True,
+    )
     return df
 
 
-def style_exceptions_table(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
+def style_exceptions_table(df: pd.DataFrame):
     """
     Row highlighting based on Urgency.
     """
@@ -132,10 +132,67 @@ def style_exceptions_table(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     }
 
     def row_style(row):
-        u = row.get("Urgency", "Low")
-        return [colors.get(str(u), "")] * len(row)
+        u = str(row.get("Urgency", "Low"))
+        return [colors.get(u, "")] * len(row)
 
     return df.style.apply(row_style, axis=1)
+
+
+# -------------------------------
+# Basic auth helpers (Step C)
+# -------------------------------
+def _parse_allowed_emails_from_env() -> list[str]:
+    raw = os.getenv("DSH_ALLOWED_EMAILS", "").strip()
+    if not raw:
+        return []
+    return [e.strip().lower() for e in raw.split(",") if e.strip()]
+
+
+def get_allowed_emails() -> list[str]:
+    """
+    Reads allowed emails from either Streamlit secrets or env var:
+      - st.secrets["ALLOWED_EMAILS"] = ["a@x.com", "b@y.com"]
+      - env: DSH_ALLOWED_EMAILS="a@x.com,b@y.com"
+    """
+    allowed = []
+    try:
+        # st.secrets can behave like a dict
+        allowed = st.secrets.get("ALLOWED_EMAILS", [])
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        allowed = [str(e).strip().lower() for e in allowed if str(e).strip()]
+    except Exception:
+        allowed = []
+    allowed_env = _parse_allowed_emails_from_env()
+    # merge + dedupe
+    merged = sorted(set(allowed + allowed_env))
+    return merged
+
+
+def require_email_access_gate():
+    """
+    Email gate.
+    - If allowlist exists, require email to be in allowlist.
+    - If no allowlist configured, allow anyone (but show warning).
+    """
+    st.subheader("Access")
+    email = st.text_input("Work email", key="auth_email").strip().lower()
+
+    allowed = get_allowed_emails()
+    if allowed:
+        if not email:
+            st.info("Enter your work email to continue.")
+            st.stop()
+        if email not in allowed:
+            st.error("This email is not authorized for early access.")
+            st.caption("Ask the admin to add your email to the allowlist.")
+            st.stop()
+        st.success("Email verified ✅")
+    else:
+        st.warning("No email allowlist configured. Anyone with the access code can enter.")
+        st.caption(
+            "To enable email auth: set Streamlit secret ALLOWED_EMAILS or env var DSH_ALLOWED_EMAILS."
+        )
 
 
 # -------------------------------
@@ -144,18 +201,51 @@ def style_exceptions_table(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
 st.set_page_config(page_title="Dropship Hub", layout="wide")
 
 # -------------------------------
-# Early Access Gate (Step 6D)
+# Early Access Gate (existing)
 # -------------------------------
 ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
 
 st.title("Dropship Hub — Early Access")
 st.caption("Drop ship made easy — exceptions, follow-ups, and visibility in one hub.")
 
-code = st.text_input("Enter early access code", type="password")
+code = st.text_input("Enter early access code", type="password", key="access_code")
 
 if code != ACCESS_CODE:
     st.info("This app is currently in early access. Enter your code to continue.")
     st.stop()
+
+# -------------------------------
+# Step C: Email authentication gate
+# -------------------------------
+require_email_access_gate()
+
+# -------------------------------
+# Step D: Paid product framing (lightweight)
+# -------------------------------
+with st.sidebar:
+    st.divider()
+    st.header("Plan")
+    plan = st.selectbox("Current plan", ["Early Access (Free)", "Pro", "Team"], index=0)
+    st.caption("This is a lightweight placeholder while you validate demand.")
+
+    with st.expander("Upgrade / Pricing (placeholder)", expanded=False):
+        st.markdown(
+            """
+**Early Access (Free)**
+- CSV uploads
+- Exceptions + supplier follow-ups
+
+**Pro**
+- Saved workspaces (coming soon)
+- Supplier scorecards (coming soon)
+- Automations (coming soon)
+
+**Team**
+- Role-based access (coming soon)
+- Audit trail (coming soon)
+- Shared templates (coming soon)
+            """.strip()
+        )
 
 # -------------------------------
 # Paths
@@ -195,7 +285,9 @@ if use_demo:
         raw_tracking = pd.read_csv(DATA_DIR / "raw_tracking.csv")
         st.success("Demo data loaded ✅")
     except Exception as e:
-        st.error("Couldn't load demo data. Make sure data/raw_orders.csv, raw_shipments.csv, raw_tracking.csv exist.")
+        st.error(
+            "Couldn't load demo data. Make sure data/raw_orders.csv, raw_shipments.csv, raw_tracking.csv exist."
+        )
         st.code(str(e))
         st.stop()
 
@@ -407,7 +499,7 @@ with st.expander("What am I looking at?", expanded=True):
     )
 
 # -------------------------------
-# Exceptions Queue
+# Exceptions Queue (Step B: urgency + highlight)
 # -------------------------------
 st.divider()
 st.subheader("Exceptions Queue (Action this first)")
@@ -415,7 +507,7 @@ st.subheader("Exceptions Queue (Action this first)")
 if exceptions is None or exceptions.empty:
     st.info("No exceptions found 🎉")
 else:
-    # Add urgency + sort (NEW)
+    # Add urgency (NEW)
     exceptions = add_urgency_column(exceptions)
 
     fcol1, fcol2, fcol3, fcol4 = st.columns(4)
@@ -438,7 +530,6 @@ else:
         )
         supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers)
 
-    # NEW: urgency filter
     with fcol4:
         urgencies = ["Critical", "High", "Medium", "Low"]
         urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies)
@@ -453,7 +544,7 @@ else:
     if urgency_filter and "Urgency" in filtered.columns:
         filtered = filtered[filtered["Urgency"].isin(urgency_filter)]
 
-    # NEW: summary counts
+    # Summary counts (NEW)
     if "Urgency" in filtered.columns:
         counts = filtered["Urgency"].value_counts().to_dict()
         st.write(
@@ -479,9 +570,10 @@ else:
     ]
     show_cols = [c for c in preferred_cols if c in filtered.columns]
 
-    # NEW: sort by urgency first
-    if "Urgency" in filtered.columns:
-        filtered = filtered.sort_values(["Urgency"], ascending=True)
+    # Sort by urgency then order_id if available (NEW)
+    sort_cols = [c for c in ["Urgency", "order_id"] if c in filtered.columns]
+    if sort_cols:
+        filtered = filtered.sort_values(sort_cols, ascending=True)
 
     st.dataframe(style_exceptions_table(filtered[show_cols]), use_container_width=True, height=420)
 
@@ -493,7 +585,7 @@ else:
     )
 
 # -------------------------------
-# Supplier Follow-ups (with Copy buttons)
+# Supplier Follow-ups (Step A: copy buttons)
 # -------------------------------
 st.divider()
 st.subheader("Supplier Follow-ups (Copy/Paste Ready)")
@@ -517,7 +609,7 @@ else:
         mime="text/csv",
     )
 
-    # Email preview + ONE-CLICK COPY
+    # Email preview + ONE-CLICK COPY (subject/body/email)  (Step A expanded)
     if "supplier_name" in followups.columns and "body" in followups.columns and len(followups) > 0:
         st.divider()
         st.markdown("### Email preview (select a supplier)")
@@ -529,6 +621,7 @@ else:
         )
         row = followups[followups["supplier_name"] == chosen].iloc[0]
 
+        supplier_email = row.get("supplier_email", "") if "supplier_email" in followups.columns else ""
         subject = (
             row.get("subject", "Action required: outstanding shipments")
             if "subject" in followups.columns
@@ -536,18 +629,21 @@ else:
         )
         body = row.get("body", "")
 
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
-            copy_button(subject, "Copy subject", key=f"copy_subject_{chosen}")
+            copy_button(supplier_email, "Copy supplier email", key=f"copy_supplier_email_{chosen}")
         with c2:
+            copy_button(subject, "Copy subject", key=f"copy_subject_{chosen}")
+        with c3:
             copy_button(body, "Copy body", key=f"copy_body_{chosen}")
 
+        st.text_input("To (supplier email)", value=supplier_email, key="email_to_preview")
         st.text_input("Subject", value=subject, key="email_subject_preview")
         st.text_area("Body", value=body, height=260, key="email_body_preview")
 
         st.download_button(
             "Download email as .txt",
-            data=(f"Subject: {subject}\n\n{body}").encode("utf-8"),
+            data=(f"To: {supplier_email}\nSubject: {subject}\n\n{body}").encode("utf-8"),
             file_name=f"supplier_email_{chosen}.txt".replace(" ", "_").lower(),
             mime="text/plain",
         )
