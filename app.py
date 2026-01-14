@@ -1,5 +1,10 @@
 # app.py
 import os
+import json
+import io
+import zipfile
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -28,7 +33,6 @@ def copy_button(text: str, label: str, key: str):
     Renders a button that copies `text` to clipboard using the browser clipboard API.
     Uses a unique `key` to avoid DOM id collisions.
     """
-    # Escape for JS template literal
     safe_text = (
         str(text)
         .replace("\\", "\\\\")
@@ -81,7 +85,6 @@ def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
 
         blob = " ".join([issue_type, explanation, next_action, risk, line_status])
 
-        # Critical
         critical_terms = [
             "late", "past due", "overdue", "late unshipped",
             "missing tracking", "no tracking", "tracking missing",
@@ -91,7 +94,6 @@ def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
         if any(t in blob for t in critical_terms):
             return "Critical"
 
-        # High
         high_terms = [
             "partial", "partial shipment",
             "mismatch", "quantity mismatch",
@@ -101,7 +103,6 @@ def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
         if any(t in blob for t in high_terms):
             return "High"
 
-        # Medium
         medium_terms = ["verify", "check", "confirm", "format", "invalid", "missing"]
         if any(t in blob for t in medium_terms):
             return "Medium"
@@ -118,9 +119,6 @@ def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def style_exceptions_table(df: pd.DataFrame):
-    """
-    Row highlighting based on Urgency.
-    """
     if "Urgency" not in df.columns:
         return df.style
 
@@ -156,7 +154,6 @@ def get_allowed_emails() -> list[str]:
     """
     allowed = []
     try:
-        # st.secrets can behave like a dict
         allowed = st.secrets.get("ALLOWED_EMAILS", [])
         if isinstance(allowed, str):
             allowed = [allowed]
@@ -164,17 +161,10 @@ def get_allowed_emails() -> list[str]:
     except Exception:
         allowed = []
     allowed_env = _parse_allowed_emails_from_env()
-    # merge + dedupe
-    merged = sorted(set(allowed + allowed_env))
-    return merged
+    return sorted(set(allowed + allowed_env))
 
 
 def require_email_access_gate():
-    """
-    Email gate.
-    - If allowlist exists, require email to be in allowlist.
-    - If no allowlist configured, allow anyone (but show warning).
-    """
     st.subheader("Access")
     email = st.text_input("Work email", key="auth_email").strip().lower()
 
@@ -190,16 +180,12 @@ def require_email_access_gate():
         st.success("Email verified ✅")
     else:
         st.warning("No email allowlist configured. Anyone with the access code can enter.")
-        st.caption(
-            "To enable email auth: set Streamlit secret ALLOWED_EMAILS or env var DSH_ALLOWED_EMAILS."
-        )
-
-import json
-import io
-import zipfile
-from datetime import datetime
+        st.caption("To enable email auth: set Streamlit secret ALLOWED_EMAILS or env var DSH_ALLOWED_EMAILS.")
 
 
+# -------------------------------
+# Step 7/7.5: Workspaces (Save/Load/History/Delete)
+# -------------------------------
 def _safe_slug(s: str) -> str:
     s = (s or "").strip()
     keep = []
@@ -216,7 +202,9 @@ def workspace_root(data_dir: Path, account_id: str, store_id: str) -> Path:
 
 def list_runs(ws_root: Path) -> list[dict]:
     """
-    Returns list of runs [{run_id, path, created_at, workspace_name}...] sorted newest first.
+    Returns list of runs:
+      {workspace_name, run_id, path, created_at, meta}
+    Sorted newest first.
     """
     if not ws_root.exists():
         return []
@@ -228,21 +216,23 @@ def list_runs(ws_root: Path) -> list[dict]:
         for run_dir in workspace_dir.iterdir():
             if not run_dir.is_dir():
                 continue
+
             meta_path = run_dir / "meta.json"
+            meta = {}
             if meta_path.exists():
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 except Exception:
                     meta = {}
-            else:
-                meta = {}
+
+            created_at = meta.get("created_at", run_dir.name)
 
             runs.append(
                 {
                     "workspace_name": workspace_dir.name,
                     "run_id": run_dir.name,
                     "path": run_dir,
-                    "created_at": meta.get("created_at", run_dir.name),
+                    "created_at": created_at,
                     "meta": meta,
                 }
             )
@@ -266,22 +256,18 @@ def save_run(
     line_status_df: pd.DataFrame,
     kpis: dict,
 ) -> Path:
-    """
-    Saves a run to:
-      data/workspaces/<account>/<store>/<workspace>/<run_id>/
-    """
     workspace_name = _safe_slug(workspace_name)
     run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     run_dir = ws_root / workspace_name / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save outputs
+    # Outputs
     exceptions.to_csv(run_dir / "exceptions.csv", index=False)
     followups.to_csv(run_dir / "followups.csv", index=False)
     order_rollup.to_csv(run_dir / "order_rollup.csv", index=False)
     line_status_df.to_csv(run_dir / "line_status.csv", index=False)
 
-    # Save inputs (optional but useful)
+    # Inputs (useful for debug / repeatability)
     orders.to_csv(run_dir / "orders_normalized.csv", index=False)
     shipments.to_csv(run_dir / "shipments_normalized.csv", index=False)
     tracking.to_csv(run_dir / "tracking_normalized.csv", index=False)
@@ -308,32 +294,31 @@ def save_run(
 
 
 def load_run(run_dir: Path) -> dict:
-    """
-    Loads a run from disk and returns dict of dataframes + meta.
-    """
-    out = {}
-    out["meta"] = {}
+    out = {"meta": {}}
+
     meta_path = run_dir / "meta.json"
     if meta_path.exists():
-        out["meta"] = json.loads(meta_path.read_text(encoding="utf-8"))
+        try:
+            out["meta"] = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            out["meta"] = {}
 
-    # outputs
-    out["exceptions"] = pd.read_csv(run_dir / "exceptions.csv") if (run_dir / "exceptions.csv").exists() else pd.DataFrame()
-    out["followups"] = pd.read_csv(run_dir / "followups.csv") if (run_dir / "followups.csv").exists() else pd.DataFrame()
-    out["order_rollup"] = pd.read_csv(run_dir / "order_rollup.csv") if (run_dir / "order_rollup.csv").exists() else pd.DataFrame()
-    out["line_status_df"] = pd.read_csv(run_dir / "line_status.csv") if (run_dir / "line_status.csv").exists() else pd.DataFrame()
+    def _read_csv(name: str) -> pd.DataFrame:
+        p = run_dir / name
+        return pd.read_csv(p) if p.exists() else pd.DataFrame()
 
-    # inputs (optional)
-    out["orders"] = pd.read_csv(run_dir / "orders_normalized.csv") if (run_dir / "orders_normalized.csv").exists() else pd.DataFrame()
-    out["shipments"] = pd.read_csv(run_dir / "shipments_normalized.csv") if (run_dir / "shipments_normalized.csv").exists() else pd.DataFrame()
-    out["tracking"] = pd.read_csv(run_dir / "tracking_normalized.csv") if (run_dir / "tracking_normalized.csv").exists() else pd.DataFrame()
+    out["exceptions"] = _read_csv("exceptions.csv")
+    out["followups"] = _read_csv("followups.csv")
+    out["order_rollup"] = _read_csv("order_rollup.csv")
+    out["line_status_df"] = _read_csv("line_status.csv")
+
+    out["orders"] = _read_csv("orders_normalized.csv")
+    out["shipments"] = _read_csv("shipments_normalized.csv")
+    out["tracking"] = _read_csv("tracking_normalized.csv")
     return out
 
 
 def make_run_zip_bytes(run_dir: Path) -> bytes:
-    """
-    Zips all files in run_dir and returns bytes.
-    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for p in run_dir.rglob("*"):
@@ -342,13 +327,49 @@ def make_run_zip_bytes(run_dir: Path) -> bytes:
     buf.seek(0)
     return buf.read()
 
+
+def delete_run_dir(run_dir: Path) -> None:
+    if run_dir.exists() and run_dir.is_dir():
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def build_run_history_df(runs: list[dict]) -> pd.DataFrame:
+    """
+    Step 7.5: run history table (workspace/date/counts + a couple KPIs if present)
+    """
+    rows = []
+    for r in runs:
+        meta = r.get("meta", {}) or {}
+        counts = meta.get("row_counts", {}) or {}
+        kpis = meta.get("kpis", {}) or {}
+
+        rows.append(
+            {
+                "workspace": r.get("workspace_name", ""),
+                "run_id": r.get("run_id", ""),
+                "created_at": meta.get("created_at", r.get("created_at", "")),
+                "exceptions": counts.get("exceptions", ""),
+                "followups": counts.get("followups", ""),
+                "orders": counts.get("orders", ""),
+                "shipments": counts.get("shipments", ""),
+                "pct_unshipped": kpis.get("pct_unshipped", ""),
+                "pct_late_unshipped": kpis.get("pct_late_unshipped", ""),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    if not df.empty and "created_at" in df.columns:
+        df = df.sort_values("created_at", ascending=False)
+    return df
+
+
 # -------------------------------
 # Page setup
 # -------------------------------
 st.set_page_config(page_title="Dropship Hub", layout="wide")
 
 # -------------------------------
-# Early Access Gate (existing)
+# Early Access Gate
 # -------------------------------
 ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
 
@@ -367,14 +388,18 @@ if code != ACCESS_CODE:
 require_email_access_gate()
 
 # -------------------------------
-# Step D: Paid product framing (lightweight)
+# Paths
+# -------------------------------
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
+(DATA_DIR / "workspaces").mkdir(parents=True, exist_ok=True)  # ensure exists for Step 7
+
+# -------------------------------
+# Sidebar: plan + tenant + defaults
 # -------------------------------
 with st.sidebar:
-    st.divider()
     st.header("Plan")
     plan = st.selectbox("Current plan", ["Early Access (Free)", "Pro", "Team"], index=0)
-    st.caption("This is a lightweight placeholder while you validate demand.")
-
     with st.expander("Upgrade / Pricing (placeholder)", expanded=False):
         st.markdown(
             """
@@ -383,7 +408,7 @@ with st.sidebar:
 - Exceptions + supplier follow-ups
 
 **Pro**
-- Saved workspaces (coming soon)
+- Saved workspaces
 - Supplier scorecards (coming soon)
 - Automations (coming soon)
 
@@ -394,11 +419,24 @@ with st.sidebar:
             """.strip()
         )
 
-# -------------------------------
-# Paths
-# -------------------------------
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
+    st.divider()
+    st.header("Tenant")
+    account_id = st.text_input("account_id", value="demo_account")
+    store_id = st.text_input("store_id", value="demo_store")
+    platform_hint = st.selectbox("platform hint", ["shopify", "amazon", "etsy", "other"], index=0)
+
+    st.divider()
+    st.header("Defaults")
+    default_currency = st.text_input("Default currency", value="USD")
+    default_promised_ship_days = st.number_input(
+        "Default promised ship days (SLA)",
+        min_value=1,
+        max_value=30,
+        value=3,
+    )
+
+    st.divider()
+    st.caption("Tip: Click demo to see the workflow before uploading files.")
 
 # -------------------------------
 # Onboarding checklist
@@ -432,9 +470,7 @@ if use_demo:
         raw_tracking = pd.read_csv(DATA_DIR / "raw_tracking.csv")
         st.success("Demo data loaded ✅")
     except Exception as e:
-        st.error(
-            "Couldn't load demo data. Make sure data/raw_orders.csv, raw_shipments.csv, raw_tracking.csv exist."
-        )
+        st.error("Couldn't load demo data. Make sure data/raw_orders.csv, raw_shipments.csv, raw_tracking.csv exist.")
         st.code(str(e))
         st.stop()
 
@@ -513,28 +549,6 @@ with t3:
     )
 
 # -------------------------------
-# Sidebar: tenant + defaults
-# -------------------------------
-with st.sidebar:
-    st.header("Tenant")
-    account_id = st.text_input("account_id", value="demo_account")
-    store_id = st.text_input("store_id", value="demo_store")
-    platform_hint = st.selectbox("platform hint", ["shopify", "amazon", "etsy", "other"], index=0)
-
-    st.divider()
-    st.header("Defaults")
-    default_currency = st.text_input("Default currency", value="USD")
-    default_promised_ship_days = st.number_input(
-        "Default promised ship days (SLA)",
-        min_value=1,
-        max_value=30,
-        value=3,
-    )
-
-    st.divider()
-    st.caption("Tip: Click demo to see the workflow before uploading files.")
-
-# -------------------------------
 # Run pipeline: demo OR uploads
 # -------------------------------
 has_uploads = (f_orders is not None) and (f_shipments is not None)
@@ -601,7 +615,123 @@ except Exception as e:
 try:
     exceptions = enhance_explanations(exceptions)
 except Exception:
-    pass  # never crash because AI failed
+    pass
+
+# -------------------------------
+# Step 7 + 7.5: Workspaces UI (Save/Load/History/Delete)
+# -------------------------------
+ws_root = workspace_root(DATA_DIR, account_id, store_id)
+ws_root.mkdir(parents=True, exist_ok=True)
+
+if "loaded_run" not in st.session_state:
+    st.session_state["loaded_run"] = None
+
+with st.sidebar:
+    st.divider()
+    st.header("Workspaces")
+
+    workspace_name = st.text_input("Workspace name", value="default", key="ws_name")
+
+    # Save current run
+    if st.button("💾 Save this run", key="btn_save_run"):
+        run_dir = save_run(
+            ws_root=ws_root,
+            workspace_name=workspace_name,
+            account_id=account_id,
+            store_id=store_id,
+            platform_hint=platform_hint,
+            orders=orders,
+            shipments=shipments,
+            tracking=tracking,
+            exceptions=exceptions,
+            followups=followups,
+            order_rollup=order_rollup,
+            line_status_df=line_status_df,
+            kpis=kpis,
+        )
+        st.success(f"Saved ✅ {workspace_name}/{run_dir.name}")
+        st.session_state["loaded_run"] = str(run_dir)
+
+    runs = list_runs(ws_root)
+
+    # Load previous run
+    if runs:
+        run_labels = [
+            f"{r['workspace_name']} / {r['run_id']}  (exceptions: {r.get('meta', {}).get('row_counts', {}).get('exceptions', '?')})"
+            for r in runs
+        ]
+        chosen_idx = st.selectbox(
+            "Load previous run",
+            options=list(range(len(runs))),
+            format_func=lambda i: run_labels[i],
+            key="ws_load_select",
+        )
+
+        cL1, cL2 = st.columns(2)
+        with cL1:
+            if st.button("📂 Load", key="btn_load_run"):
+                st.session_state["loaded_run"] = str(runs[chosen_idx]["path"])
+                st.success("Loaded ✅")
+        with cL2:
+            if st.session_state["loaded_run"]:
+                try:
+                    run_dir = Path(st.session_state["loaded_run"])
+                    zip_bytes = make_run_zip_bytes(run_dir)
+                    st.download_button(
+                        "⬇️ Run Pack",
+                        data=zip_bytes,
+                        file_name=f"runpack_{run_dir.parent.name}_{run_dir.name}.zip",
+                        mime="application/zip",
+                        key="btn_zip_runpack",
+                    )
+                except Exception:
+                    st.caption("Could not build ZIP for the loaded run.")
+
+        # -------------------------------
+        # Step 7.5: Run history + delete
+        # -------------------------------
+        with st.expander("Run history (7.5)", expanded=False):
+            history_df = build_run_history_df(runs)
+            if history_df.empty:
+                st.info("No saved runs yet.")
+            else:
+                st.dataframe(history_df, use_container_width=True, height=220)
+
+            st.divider()
+            st.markdown("**Delete a saved run**")
+            st.caption("This permanently deletes the selected run folder on disk.")
+
+            delete_idx = st.selectbox(
+                "Select run to delete",
+                options=list(range(len(runs))),
+                format_func=lambda i: f"{runs[i]['workspace_name']} / {runs[i]['run_id']}",
+                key="ws_delete_select",
+            )
+
+            confirm = st.checkbox("I understand this cannot be undone", key="ws_delete_confirm")
+            if st.button("🗑️ Delete run", disabled=not confirm, key="btn_delete_run"):
+                target = Path(runs[delete_idx]["path"])
+                loaded_path = st.session_state.get("loaded_run")
+                delete_run_dir(target)
+
+                # If we deleted the loaded run, clear it
+                if loaded_path and Path(loaded_path) == target:
+                    st.session_state["loaded_run"] = None
+
+                st.success("Deleted ✅")
+                st.rerun()
+    else:
+        st.caption("No saved runs yet. Click **Save this run** to create your first run history entry.")
+
+# If a run is loaded, override the outputs used by the UI below
+if st.session_state.get("loaded_run"):
+    loaded = load_run(Path(st.session_state["loaded_run"]))
+    exceptions = loaded.get("exceptions", exceptions)
+    followups = loaded.get("followups", followups)
+    order_rollup = loaded.get("order_rollup", order_rollup)
+    line_status_df = loaded.get("line_status_df", line_status_df)
+    meta = loaded.get("meta", {}) or {}
+    st.info(f"Viewing saved run: **{meta.get('workspace_name','')} / {meta.get('created_at','')}**")
 
 # -------------------------------
 # Dashboard KPIs
@@ -646,7 +776,7 @@ with st.expander("What am I looking at?", expanded=True):
     )
 
 # -------------------------------
-# Exceptions Queue (Step B: urgency + highlight)
+# Exceptions Queue
 # -------------------------------
 st.divider()
 st.subheader("Exceptions Queue (Action this first)")
@@ -654,7 +784,6 @@ st.subheader("Exceptions Queue (Action this first)")
 if exceptions is None or exceptions.empty:
     st.info("No exceptions found 🎉")
 else:
-    # Add urgency (NEW)
     exceptions = add_urgency_column(exceptions)
 
     fcol1, fcol2, fcol3, fcol4 = st.columns(4)
@@ -691,7 +820,6 @@ else:
     if urgency_filter and "Urgency" in filtered.columns:
         filtered = filtered[filtered["Urgency"].isin(urgency_filter)]
 
-    # Summary counts (NEW)
     if "Urgency" in filtered.columns:
         counts = filtered["Urgency"].value_counts().to_dict()
         st.write(
@@ -717,7 +845,6 @@ else:
     ]
     show_cols = [c for c in preferred_cols if c in filtered.columns]
 
-    # Sort by urgency then order_id if available (NEW)
     sort_cols = [c for c in ["Urgency", "order_id"] if c in filtered.columns]
     if sort_cols:
         filtered = filtered.sort_values(sort_cols, ascending=True)
@@ -732,7 +859,7 @@ else:
     )
 
 # -------------------------------
-# Supplier Follow-ups (Step A: copy buttons)
+# Supplier Follow-ups (with Copy buttons)
 # -------------------------------
 st.divider()
 st.subheader("Supplier Follow-ups (Copy/Paste Ready)")
@@ -756,7 +883,7 @@ else:
         mime="text/csv",
     )
 
-    # Email preview + ONE-CLICK COPY (subject/body/email)  (Step A expanded)
+    # Email preview + copy
     if "supplier_name" in followups.columns and "body" in followups.columns and len(followups) > 0:
         st.divider()
         st.markdown("### Email preview (select a supplier)")
@@ -769,11 +896,7 @@ else:
         row = followups[followups["supplier_name"] == chosen].iloc[0]
 
         supplier_email = row.get("supplier_email", "") if "supplier_email" in followups.columns else ""
-        subject = (
-            row.get("subject", "Action required: outstanding shipments")
-            if "subject" in followups.columns
-            else "Action required: outstanding shipments"
-        )
+        subject = row.get("subject", "Action required: outstanding shipments") if "subject" in followups.columns else "Action required: outstanding shipments"
         body = row.get("body", "")
 
         c1, c2, c3 = st.columns(3)
