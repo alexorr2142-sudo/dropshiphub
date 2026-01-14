@@ -41,6 +41,7 @@ from ui.workspaces_ui import render_workspaces_sidebar_and_maybe_override_output
 from ui.actions_ui import render_daily_action_list
 from ui.customer_impact_ui import render_customer_impact_view
 from ui.supplier_accountability_ui import render_supplier_accountability
+from ui.comms_pack_ui import render_comms_pack_download
 
 
 # -------------------------------
@@ -64,6 +65,7 @@ def _startup_sanity_check():
         "core/actions.py",
         "core/customer_impact.py",
         "core/supplier_accountability.py",
+        "core/comms_pack.py",
         "ui/__init__.py",
         "ui/auth.py",
         "ui/demo.py",
@@ -73,6 +75,7 @@ def _startup_sanity_check():
         "ui/actions_ui.py",
         "ui/customer_impact_ui.py",
         "ui/supplier_accountability_ui.py",
+        "ui/comms_pack_ui.py",
     ]
     missing = [rel for rel in required if not (ROOT / rel).exists()]
     if missing:
@@ -108,7 +111,12 @@ def _df_signature(df: pd.DataFrame) -> str:
         return f"{shape}|{cols}"
 
 
-def _inputs_signature(raw_orders: pd.DataFrame, raw_shipments: pd.DataFrame, raw_tracking: pd.DataFrame, demo_mode: bool) -> str:
+def _inputs_signature(
+    raw_orders: pd.DataFrame,
+    raw_shipments: pd.DataFrame,
+    raw_tracking: pd.DataFrame,
+    demo_mode: bool,
+) -> str:
     return "||".join(
         [
             f"demo={int(bool(demo_mode))}",
@@ -174,9 +182,10 @@ with st.expander("Onboarding checklist", expanded=True):
 5. Click **Run reconciliation** (this refreshes outputs)  
 6. Review **Daily Action List** (what to do today)  
 7. Review **Customer Impact View** (draft customer messages)  
-8. Review **Supplier Accountability Mode** (supplier performance note)  
-9. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
-10. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
+8. Review **Bulk Comms Pack** (download today’s comms as ZIP)  
+9. Review **Supplier Accountability Mode** (supplier performance note)  
+10. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
+11. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
         """.strip()
     )
 
@@ -218,7 +227,7 @@ raw_orders, raw_shipments, raw_tracking = get_active_raw_inputs(
 )
 
 # -------------------------------
-# High impact change: "Run reconciliation" control
+# "Run reconciliation" control (so demo edits don't auto-refresh)
 # -------------------------------
 if "run_requested" not in st.session_state:
     st.session_state["run_requested"] = False
@@ -428,6 +437,14 @@ customer_impact = build_customer_impact_view(exceptions=exceptions, max_items=50
 render_customer_impact_view(customer_impact)
 
 # -------------------------------
+# Bulk Comms Pack (Feature #4)
+# -------------------------------
+render_comms_pack_download(
+    followups=followups,
+    customer_impact=customer_impact,
+)
+
+# -------------------------------
 # Supplier Accountability Mode (Feature #3)
 # -------------------------------
 accountability_view = build_supplier_accountability_view(scorecard, top_n=10)
@@ -450,15 +467,27 @@ else:
 
     with fcol2:
         countries = sorted(
-            [c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist()
-             if str(c).strip() != ""]
+            [
+                c
+                for c in exceptions.get("customer_country", pd.Series([], dtype="object"))
+                .dropna()
+                .unique()
+                .tolist()
+                if str(c).strip() != ""
+            ]
         )
         country_filter = st.multiselect("Customer country", countries, default=countries)
 
     with fcol3:
         suppliers = sorted(
-            [s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist()
-             if str(s).strip() != ""]
+            [
+                s
+                for s in exceptions.get("supplier_name", pd.Series([], dtype="object"))
+                .dropna()
+                .unique()
+                .tolist()
+                if str(s).strip() != ""
+            ]
         )
         supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers)
 
@@ -523,10 +552,7 @@ st.subheader("Supplier Follow-ups (Copy/Paste Ready)")
 if followups is None or followups.empty:
     st.info("No follow-ups needed.")
 else:
-    summary_cols = [
-        c for c in ["supplier_name", "supplier_email", "urgency", "item_count", "order_ids"]
-        if c in followups.columns
-    ]
+    summary_cols = [c for c in ["supplier_name", "supplier_email", "urgency", "item_count", "order_ids"] if c in followups.columns]
     if summary_cols:
         st.dataframe(followups[summary_cols], use_container_width=True, height=220)
     else:
@@ -543,11 +569,7 @@ else:
         st.divider()
         st.markdown("### Email preview (select a supplier)")
 
-        chosen = st.selectbox(
-            "Supplier",
-            followups["supplier_name"].tolist(),
-            key="supplier_email_preview_select",
-        )
+        chosen = st.selectbox("Supplier", followups["supplier_name"].tolist(), key="supplier_email_preview_select")
         row = followups[followups["supplier_name"] == chosen].iloc[0]
 
         supplier_email = row.get("supplier_email", "") if "supplier_email" in followups.columns else ""
