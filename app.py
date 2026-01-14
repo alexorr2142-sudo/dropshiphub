@@ -60,6 +60,85 @@ def copy_button(text: str, label: str, key: str):
 
 
 # -------------------------------
+# NEW: Exceptions urgency + styling (Step B)
+# -------------------------------
+def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds an 'Urgency' column based on issue_type/explanation/next_action/customer_risk.
+    This is best-effort and safe (won't crash if columns are missing).
+    """
+    df = exceptions_df.copy()
+
+    # Pick a text column to classify from (best effort)
+    # We'll combine several columns if present.
+    def classify_row(row) -> str:
+        issue_type = str(row.get("issue_type", "")).lower()
+        explanation = str(row.get("explanation", "")).lower()
+        next_action = str(row.get("next_action", "")).lower()
+        risk = str(row.get("customer_risk", "")).lower()
+
+        blob = " ".join([issue_type, explanation, next_action, risk])
+
+        # Critical signals
+        critical_terms = [
+            "late unshipped", "late", "past due", "overdue",
+            "address missing", "missing address",
+            "missing tracking", "no tracking",
+            "carrier exception", "exception", "returned to sender",
+            "lost", "stuck", "seized"
+        ]
+        if any(t in blob for t in critical_terms):
+            return "Critical"
+
+        # High signals
+        high_terms = [
+            "partial", "partial shipment",
+            "mismatch", "quantity mismatch",
+            "invalid tracking", "tracking invalid",
+            "carrier unknown", "unknown carrier",
+            "needs follow up", "follow-up", "follow up"
+        ]
+        if any(t in blob for t in high_terms):
+            return "High"
+
+        # Medium signals
+        med_terms = ["verify", "check", "confirm", "format", "invalid", "missing"]
+        if any(t in blob for t in med_terms):
+            return "Medium"
+
+        return "Low"
+
+    df["Urgency"] = df.apply(classify_row, axis=1)
+
+    # Order for sorting
+    order = ["Critical", "High", "Medium", "Low"]
+    df["Urgency"] = pd.Categorical(df["Urgency"], categories=order, ordered=True)
+
+    return df
+
+
+def style_exceptions_table(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
+    """
+    Row highlighting based on Urgency.
+    """
+    if "Urgency" not in df.columns:
+        return df.style
+
+    colors = {
+        "Critical": "background-color: #ffd6d6;",
+        "High": "background-color: #fff1cc;",
+        "Medium": "background-color: #f3f3f3;",
+        "Low": ""
+    }
+
+    def row_style(row):
+        u = row.get("Urgency", "Low")
+        return [colors.get(str(u), "")] * len(row)
+
+    return df.style.apply(row_style, axis=1)
+
+
+# -------------------------------
 # Page setup
 # -------------------------------
 st.set_page_config(page_title="Dropship Hub", layout="wide")
@@ -336,7 +415,10 @@ st.subheader("Exceptions Queue (Action this first)")
 if exceptions is None or exceptions.empty:
     st.info("No exceptions found 🎉")
 else:
-    fcol1, fcol2, fcol3 = st.columns(3)
+    # Add urgency + sort (NEW)
+    exceptions = add_urgency_column(exceptions)
+
+    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
 
     with fcol1:
         issue_types = sorted(exceptions["issue_type"].dropna().unique().tolist()) if "issue_type" in exceptions.columns else []
@@ -356,6 +438,11 @@ else:
         )
         supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers)
 
+    # NEW: urgency filter
+    with fcol4:
+        urgencies = ["Critical", "High", "Medium", "Low"]
+        urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies)
+
     filtered = exceptions.copy()
     if issue_filter and "issue_type" in filtered.columns:
         filtered = filtered[filtered["issue_type"].isin(issue_filter)]
@@ -363,8 +450,21 @@ else:
         filtered = filtered[filtered["customer_country"].isin(country_filter)]
     if supplier_filter and "supplier_name" in filtered.columns:
         filtered = filtered[filtered["supplier_name"].isin(supplier_filter)]
+    if urgency_filter and "Urgency" in filtered.columns:
+        filtered = filtered[filtered["Urgency"].isin(urgency_filter)]
+
+    # NEW: summary counts
+    if "Urgency" in filtered.columns:
+        counts = filtered["Urgency"].value_counts().to_dict()
+        st.write(
+            f"**Critical:** {counts.get('Critical', 0)} | "
+            f"**High:** {counts.get('High', 0)} | "
+            f"**Medium:** {counts.get('Medium', 0)} | "
+            f"**Low:** {counts.get('Low', 0)}"
+        )
 
     preferred_cols = [
+        "Urgency",
         "order_id",
         "sku",
         "issue_type",
@@ -378,7 +478,12 @@ else:
         "customer_risk",
     ]
     show_cols = [c for c in preferred_cols if c in filtered.columns]
-    st.dataframe(filtered[show_cols], use_container_width=True, height=420)
+
+    # NEW: sort by urgency first
+    if "Urgency" in filtered.columns:
+        filtered = filtered.sort_values(["Urgency"], ascending=True)
+
+    st.dataframe(style_exceptions_table(filtered[show_cols]), use_container_width=True, height=420)
 
     st.download_button(
         "Download Exceptions CSV",
