@@ -4,6 +4,38 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+    # Preview + ONE-CLICK COPY (NEW)
+    if "supplier_name" in followups.columns and "body" in followups.columns and len(followups) > 0:
+        st.divider()
+        st.markdown("### Email preview (select a supplier)")
+
+        chosen = st.selectbox(
+            "Supplier",
+            followups["supplier_name"].tolist(),
+            key="supplier_email_preview_select",
+        )
+        row = followups[followups["supplier_name"] == chosen].iloc[0]
+
+        subject = row.get("subject", "Action required: outstanding shipments") if "subject" in followups.columns else "Action required: outstanding shipments"
+        body = row.get("body", "")
+
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            copy_button(subject, "Copy subject", key=f"copy_subject_{chosen}")
+        with c2:
+            copy_button(body, "Copy body", key=f"copy_body_{chosen}")
+
+        st.text_input("Subject", value=subject, key="email_subject_preview")
+        st.text_area("Body", value=body, height=260, key="email_body_preview")
+
+        # Optional: download as .txt too (backup)
+        st.download_button(
+            "Download email as .txt",
+            data=(f"Subject: {subject}\n\n{body}").encode("utf-8"),
+            file_name=f"supplier_email_{chosen}.txt".replace(" ", "_").lower(),
+            mime="text/plain",
+        )
+
 
 # --- Local modules (your repo files) ---
 # If these imports fail, Streamlit will crash—so we wrap with a helpful message.
