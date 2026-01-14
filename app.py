@@ -662,6 +662,37 @@ def load_recent_scorecard_history(ws_root_str: str, max_runs: int = 25) -> pd.Da
 
 
 # -------------------------------
+# NEW: Sticky Demo Mode helpers
+# -------------------------------
+def _init_demo_tables_if_needed(data_dir: Path):
+    """
+    Loads demo CSVs ONCE into session_state and keeps them sticky across reruns.
+    Also supports explicit reset via buttons.
+    """
+    if "demo_mode" not in st.session_state:
+        st.session_state["demo_mode"] = False
+
+    if st.session_state.get("demo_mode", False):
+        if "demo_raw_orders" not in st.session_state:
+            st.session_state["demo_raw_orders"] = pd.read_csv(data_dir / "raw_orders.csv")
+        if "demo_raw_shipments" not in st.session_state:
+            st.session_state["demo_raw_shipments"] = pd.read_csv(data_dir / "raw_shipments.csv")
+        if "demo_raw_tracking" not in st.session_state:
+            st.session_state["demo_raw_tracking"] = pd.read_csv(data_dir / "raw_tracking.csv")
+    else:
+        # Optional: you can keep these even when demo_mode off, but user asked "sticky demo",
+        # so we clear them when demo is off to avoid mixing.
+        for k in ["demo_raw_orders", "demo_raw_shipments", "demo_raw_tracking"]:
+            st.session_state.pop(k, None)
+
+
+def _reset_demo_tables(data_dir: Path):
+    st.session_state["demo_raw_orders"] = pd.read_csv(data_dir / "raw_orders.csv")
+    st.session_state["demo_raw_shipments"] = pd.read_csv(data_dir / "raw_shipments.csv")
+    st.session_state["demo_raw_tracking"] = pd.read_csv(data_dir / "raw_tracking.csv")
+
+
+# -------------------------------
 # Page setup
 # -------------------------------
 st.set_page_config(page_title="Dropship Hub", layout="wide")
@@ -708,7 +739,7 @@ if SUPPLIERS_DIR.exists() and not SUPPLIERS_DIR.is_dir():
 SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
 
 # -------------------------------
-# Sidebar: plan + tenant + defaults + Supplier CRM
+# Sidebar: plan + tenant + defaults + Supplier CRM + Sticky Demo controls
 # -------------------------------
 with st.sidebar:
     st.header("Plan")
@@ -747,6 +778,36 @@ with st.sidebar:
         max_value=30,
         value=3,
     )
+
+    st.divider()
+    st.header("Demo Mode (Sticky)")
+
+    # Sticky toggle: persists across reruns automatically via session_state
+    demo_mode = st.toggle(
+        "Use demo data (sticky)",
+        key="demo_mode",
+        help="Keeps demo data and your edits across interactions until you reset or turn off demo mode.",
+    )
+
+    # Ensure demo tables exist if demo is on
+    _init_demo_tables_if_needed(DATA_DIR)
+
+    if demo_mode:
+        cdm1, cdm2 = st.columns(2)
+        with cdm1:
+            if st.button("Reset demo", use_container_width=True):
+                try:
+                    _reset_demo_tables(DATA_DIR)
+                    st.success("Demo reset ✅")
+                    st.rerun()
+                except Exception as e:
+                    st.error("Couldn't reset demo data.")
+                    st.code(str(e))
+        with cdm2:
+            if st.button("Clear demo", use_container_width=True):
+                st.session_state["demo_mode"] = False
+                _init_demo_tables_if_needed(DATA_DIR)
+                st.rerun()
 
     st.divider()
     st.header("Supplier Directory (CRM)")
@@ -793,7 +854,7 @@ st.divider()
 with st.expander("Onboarding checklist", expanded=True):
     st.markdown(
         """
-1. Click **Try demo data** to see the workflow instantly  
+1. Turn on **Demo Mode (Sticky)** to see the workflow instantly  
 2. Upload **Orders CSV** (Shopify export)  
 3. Upload **Shipments CSV** (supplier / agent export)  
 4. (Optional) Upload **Tracking CSV**  
@@ -803,25 +864,47 @@ with st.expander("Onboarding checklist", expanded=True):
     )
 
 # -------------------------------
-# Demo Mode
+# Start Here (Demo + editable demo data)
 # -------------------------------
 st.subheader("Start here")
-use_demo = st.button("Try demo data (no uploads)")
 
-raw_orders = None
-raw_shipments = None
-raw_tracking = None
+if st.session_state.get("demo_mode", False):
+    st.success("Demo mode is ON (sticky). Your demo edits persist until you reset/clear.")
 
-if use_demo:
-    try:
-        raw_orders = pd.read_csv(DATA_DIR / "raw_orders.csv")
-        raw_shipments = pd.read_csv(DATA_DIR / "raw_shipments.csv")
-        raw_tracking = pd.read_csv(DATA_DIR / "raw_tracking.csv")
-        st.success("Demo data loaded ✅")
-    except Exception as e:
-        st.error("Couldn't load demo data. Make sure data/raw_orders.csv, raw_shipments.csv, raw_tracking.csv exist.")
-        st.code(str(e))
-        st.stop()
+    with st.expander("Edit demo data (these edits persist)", expanded=True):
+        e1, e2, e3 = st.columns(3)
+
+        with e1:
+            st.caption("raw_orders.csv (demo)")
+            st.session_state["demo_raw_orders"] = st.data_editor(
+                st.session_state.get("demo_raw_orders", pd.DataFrame()),
+                use_container_width=True,
+                height=280,
+                num_rows="dynamic",
+                key="demo_orders_editor",
+            )
+
+        with e2:
+            st.caption("raw_shipments.csv (demo)")
+            st.session_state["demo_raw_shipments"] = st.data_editor(
+                st.session_state.get("demo_raw_shipments", pd.DataFrame()),
+                use_container_width=True,
+                height=280,
+                num_rows="dynamic",
+                key="demo_shipments_editor",
+            )
+
+        with e3:
+            st.caption("raw_tracking.csv (demo)")
+            st.session_state["demo_raw_tracking"] = st.data_editor(
+                st.session_state.get("demo_raw_tracking", pd.DataFrame()),
+                use_container_width=True,
+                height=280,
+                num_rows="dynamic",
+                key="demo_tracking_editor",
+            )
+else:
+    st.info("Turn on **Demo Mode (Sticky)** in the sidebar to play with demo data (edits persist).")
 
 # -------------------------------
 # Upload section
@@ -898,14 +981,40 @@ with t3:
     )
 
 # -------------------------------
-# Run pipeline: demo OR uploads
+# Run pipeline: demo OR uploads (STICKY DEMO FIX)
 # -------------------------------
+raw_orders = None
+raw_shipments = None
+raw_tracking = None
+
+demo_mode_active = st.session_state.get("demo_mode", False)
+
 has_uploads = (f_orders is not None) and (f_shipments is not None)
-if not (use_demo or has_uploads):
-    st.info("Upload Orders + Shipments, or click **Try demo data** to begin.")
+
+if not (demo_mode_active or has_uploads):
+    st.info("Upload Orders + Shipments, or turn on **Demo Mode (Sticky)** in the sidebar to begin.")
     st.stop()
 
-if not use_demo:
+if demo_mode_active:
+    # Use sticky in-session demo tables (already editable + persistent)
+    try:
+        raw_orders = st.session_state.get("demo_raw_orders", pd.DataFrame())
+        raw_shipments = st.session_state.get("demo_raw_shipments", pd.DataFrame())
+        raw_tracking = st.session_state.get("demo_raw_tracking", pd.DataFrame())
+
+        if raw_orders is None or raw_orders.empty:
+            st.error("Demo orders are empty. Click **Reset demo** in the sidebar.")
+            st.stop()
+        if raw_shipments is None or raw_shipments.empty:
+            st.error("Demo shipments are empty. Click **Reset demo** in the sidebar.")
+            st.stop()
+
+        st.caption("Using sticky demo data ✅")
+    except Exception as e:
+        st.error("Couldn't load demo data. Make sure data/raw_orders.csv, raw_shipments.csv, raw_tracking.csv exist.")
+        st.code(str(e))
+        st.stop()
+else:
     try:
         raw_orders = pd.read_csv(f_orders)
         raw_shipments = pd.read_csv(f_shipments)
