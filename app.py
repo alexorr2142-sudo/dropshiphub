@@ -4,38 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-    # Preview + ONE-CLICK COPY (NEW)
-    if "supplier_name" in followups.columns and "body" in followups.columns and len(followups) > 0:
-        st.divider()
-        st.markdown("### Email preview (select a supplier)")
-
-        chosen = st.selectbox(
-            "Supplier",
-            followups["supplier_name"].tolist(),
-            key="supplier_email_preview_select",
-        )
-        row = followups[followups["supplier_name"] == chosen].iloc[0]
-
-        subject = row.get("subject", "Action required: outstanding shipments") if "subject" in followups.columns else "Action required: outstanding shipments"
-        body = row.get("body", "")
-
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            copy_button(subject, "Copy subject", key=f"copy_subject_{chosen}")
-        with c2:
-            copy_button(body, "Copy body", key=f"copy_body_{chosen}")
-
-        st.text_input("Subject", value=subject, key="email_subject_preview")
-        st.text_area("Body", value=body, height=260, key="email_body_preview")
-
-        # Optional: download as .txt too (backup)
-        st.download_button(
-            "Download email as .txt",
-            data=(f"Subject: {subject}\n\n{body}").encode("utf-8"),
-            file_name=f"supplier_email_{chosen}.txt".replace(" ", "_").lower(),
-            mime="text/plain",
-        )
-
+import streamlit.components.v1 as components
 
 # --- Local modules (your repo files) ---
 # If these imports fail, Streamlit will crash—so we wrap with a helpful message.
@@ -49,6 +18,46 @@ except Exception as e:
     st.error("Import error: one of your local .py files is missing or has an error.")
     st.code(str(e))
     st.stop()
+
+
+def copy_button(text: str, label: str, key: str):
+    """
+    Renders a button that copies `text` to clipboard using the browser clipboard API.
+    Uses a unique `key` to avoid DOM id collisions.
+    """
+    # Escape for JS template literal
+    safe_text = (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace("`", "\\`")
+        .replace("${", "\\${")
+    )
+    html = f"""
+    <div style="margin: 0.25rem 0;">
+      <button
+        id="btn-{key}"
+        style="
+          padding: 0.45rem 0.75rem;
+          border-radius: 0.5rem;
+          border: 1px solid rgba(49, 51, 63, 0.2);
+          background: white;
+          cursor: pointer;
+          font-size: 0.9rem;
+        "
+        onclick="navigator.clipboard.writeText(`{safe_text}`)
+          .then(() => {{
+            const b = document.getElementById('btn-{key}');
+            const old = b.innerText;
+            b.innerText = 'Copied ✅';
+            setTimeout(() => b.innerText = old, 1200);
+          }})
+          .catch(() => alert('Copy failed. Your browser may block clipboard access.'));">
+        {label}
+      </button>
+    </div>
+    """
+    components.html(html, height=55)
+
 
 # -------------------------------
 # Page setup
@@ -86,7 +95,7 @@ with st.expander("Onboarding checklist", expanded=True):
 2. Upload **Orders CSV** (Shopify export)  
 3. Upload **Shipments CSV** (supplier / agent export)  
 4. (Optional) Upload **Tracking CSV**  
-5. Review **Exceptions** and download **Supplier Follow-ups**  
+5. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
         """.strip()
     )
 
@@ -290,7 +299,7 @@ k4.metric("% Unshipped", f"{kpis.get('pct_unshipped', 0)}%")
 k5.metric("% Late Unshipped", f"{kpis.get('pct_late_unshipped', 0)}%")
 
 # -------------------------------
-# "What am I looking at?" panel (Step 1)
+# "What am I looking at?" panel
 # -------------------------------
 st.divider()
 with st.expander("What am I looking at?", expanded=True):
@@ -334,11 +343,17 @@ else:
         issue_filter = st.multiselect("Issue types", issue_types, default=issue_types)
 
     with fcol2:
-        countries = sorted([c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist() if str(c).strip() != ""])
+        countries = sorted(
+            [c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist()
+             if str(c).strip() != ""]
+        )
         country_filter = st.multiselect("Customer country", countries, default=countries)
 
     with fcol3:
-        suppliers = sorted([s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist() if str(s).strip() != ""])
+        suppliers = sorted(
+            [s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist()
+             if str(s).strip() != ""]
+        )
         supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers)
 
     filtered = exceptions.copy()
@@ -373,7 +388,7 @@ else:
     )
 
 # -------------------------------
-# Supplier Follow-ups
+# Supplier Follow-ups (with Copy buttons)
 # -------------------------------
 st.divider()
 st.subheader("Supplier Follow-ups (Copy/Paste Ready)")
@@ -381,7 +396,10 @@ st.subheader("Supplier Follow-ups (Copy/Paste Ready)")
 if followups is None or followups.empty:
     st.info("No follow-ups needed.")
 else:
-    summary_cols = [c for c in ["supplier_name", "supplier_email", "urgency", "item_count", "order_ids"] if c in followups.columns]
+    summary_cols = [
+        c for c in ["supplier_name", "supplier_email", "urgency", "item_count", "order_ids"]
+        if c in followups.columns
+    ]
     if summary_cols:
         st.dataframe(followups[summary_cols], use_container_width=True, height=220)
     else:
@@ -394,13 +412,40 @@ else:
         mime="text/csv",
     )
 
-    # Preview one supplier email (if available)
+    # Email preview + ONE-CLICK COPY
     if "supplier_name" in followups.columns and "body" in followups.columns and len(followups) > 0:
-        chosen = st.selectbox("Preview email for supplier", followups["supplier_name"].tolist())
+        st.divider()
+        st.markdown("### Email preview (select a supplier)")
+
+        chosen = st.selectbox(
+            "Supplier",
+            followups["supplier_name"].tolist(),
+            key="supplier_email_preview_select",
+        )
         row = followups[followups["supplier_name"] == chosen].iloc[0]
-        if "subject" in followups.columns:
-            st.text_input("Subject", value=row.get("subject", ""))
-        st.text_area("Body", value=row.get("body", ""), height=260)
+
+        subject = (
+            row.get("subject", "Action required: outstanding shipments")
+            if "subject" in followups.columns
+            else "Action required: outstanding shipments"
+        )
+        body = row.get("body", "")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            copy_button(subject, "Copy subject", key=f"copy_subject_{chosen}")
+        with c2:
+            copy_button(body, "Copy body", key=f"copy_body_{chosen}")
+
+        st.text_input("Subject", value=subject, key="email_subject_preview")
+        st.text_area("Body", value=body, height=260, key="email_body_preview")
+
+        st.download_button(
+            "Download email as .txt",
+            data=(f"Subject: {subject}\n\n{body}").encode("utf-8"),
+            file_name=f"supplier_email_{chosen}.txt".replace(" ", "_").lower(),
+            mime="text/plain",
+        )
 
 # -------------------------------
 # Order-level rollup
