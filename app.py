@@ -62,11 +62,7 @@ def _startup_sanity_check():
         "ui/sidebar.py",
         "ui/workspaces_ui.py",
     ]
-    missing = []
-    for rel in required:
-        if not (ROOT / rel).exists():
-            missing.append(rel)
-
+    missing = [rel for rel in required if not (ROOT / rel).exists()]
     if missing:
         st.error("Missing required app files (repo structure issue).")
         st.code("\n".join(missing))
@@ -74,6 +70,57 @@ def _startup_sanity_check():
 
 
 _startup_sanity_check()
+
+
+# -------------------------------
+# Helpers: detect when inputs change (invalidate cached results)
+# -------------------------------
+def _df_signature(df: pd.DataFrame) -> str:
+    """
+    Cheap-ish signature so we can detect when demo edits/uploads change inputs.
+    Avoids hashing the full dataframe (which can be slow).
+    """
+    if df is None:
+        return "none"
+    if not isinstance(df, pd.DataFrame):
+        return f"not_df:{type(df)}"
+    shape = df.shape
+    cols = ",".join(map(str, df.columns.tolist()))
+    # sample for content sensitivity
+    sample = df.head(50).copy()
+    tail = df.tail(50).copy()
+    try:
+        h1 = pd.util.hash_pandas_object(sample, index=True).sum()
+        h2 = pd.util.hash_pandas_object(tail, index=True).sum()
+        return f"{shape}|{cols}|{int(h1)}|{int(h2)}"
+    except Exception:
+        # fallback if hashing fails due to weird dtypes
+        return f"{shape}|{cols}"
+
+
+def _inputs_signature(raw_orders: pd.DataFrame, raw_shipments: pd.DataFrame, raw_tracking: pd.DataFrame, demo_mode: bool) -> str:
+    return "||".join(
+        [
+            f"demo={int(bool(demo_mode))}",
+            _df_signature(raw_orders),
+            _df_signature(raw_shipments),
+            _df_signature(raw_tracking),
+        ]
+    )
+
+
+def _invalidate_results_if_inputs_changed(sig_now: str):
+    prev = st.session_state.get("inputs_sig")
+    if prev is None:
+        st.session_state["inputs_sig"] = sig_now
+        return
+
+    if sig_now != prev:
+        # Inputs changed -> cached results are stale
+        st.session_state["inputs_sig"] = sig_now
+        st.session_state["run_requested"] = False
+        st.session_state.pop("results_bundle", None)
+
 
 # -------------------------------
 # Early Access Gate
@@ -115,8 +162,9 @@ with st.expander("Onboarding checklist", expanded=True):
 2. Upload **Orders CSV** (Shopify export)  
 3. Upload **Shipments CSV** (supplier / agent export)  
 4. (Optional) Upload **Tracking CSV**  
-5. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
-6. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
+5. Click **Run reconciliation** (this refreshes outputs)  
+6. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
+7. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
         """.strip()
     )
 
@@ -158,75 +206,142 @@ raw_orders, raw_shipments, raw_tracking = get_active_raw_inputs(
 )
 
 # -------------------------------
-# Normalize
+# High impact change: "Run reconciliation" control
 # -------------------------------
+if "run_requested" not in st.session_state:
+    st.session_state["run_requested"] = False
+
+if "results_bundle" not in st.session_state:
+    st.session_state["results_bundle"] = None
+
+# If inputs change (demo edits/uploads), invalidate cached results
+sig_now = _inputs_signature(raw_orders, raw_shipments, raw_tracking, demo_mode=demo_mode)
+_invalidate_results_if_inputs_changed(sig_now)
+
 st.divider()
-st.subheader("Data checks")
+st.subheader("Run")
 
-orders, meta_o = normalize_orders(
-    raw_orders,
-    account_id=account_id,
-    store_id=store_id,
-    platform_hint=platform_hint,
-    default_currency=default_currency,
-    default_promised_ship_days=int(default_promised_ship_days),
-)
-shipments, meta_s = normalize_shipments(raw_shipments, account_id=account_id, store_id=store_id)
+r1, r2, r3 = st.columns([1, 1, 3])
+with r1:
+    if st.button("▶ Run reconciliation", use_container_width=True, key="btn_run_recon"):
+        st.session_state["run_requested"] = True
+        # clearing bundle forces a clean recompute even if button pressed twice
+        st.session_state["results_bundle"] = None
 
-tracking = pd.DataFrame()
-meta_t = {"validation_errors": []}
-if raw_tracking is not None and isinstance(raw_tracking, pd.DataFrame) and not raw_tracking.empty:
-    tracking, meta_t = normalize_tracking(raw_tracking, account_id=account_id, store_id=store_id)
+with r2:
+    if st.button("⟲ Reset results", use_container_width=True, key="btn_reset_results"):
+        st.session_state["run_requested"] = False
+        st.session_state["results_bundle"] = None
+        st.rerun()
 
-errs = meta_o.get("validation_errors", []) + meta_s.get("validation_errors", []) + meta_t.get("validation_errors", [])
-if errs:
-    st.warning("We found some schema issues. You can still proceed, but fixing these improves accuracy:")
-    for e in errs:
-        st.write("- ", e)
-else:
-    st.success("Looks good ✅")
+with r3:
+    st.caption("Tip: Edit demo tables or upload files above, then click **Run reconciliation** to refresh outputs.")
 
-# -------------------------------
-# Reconcile
-# -------------------------------
-st.divider()
-st.subheader("Running reconciliation")
-
-try:
-    line_status_df, exceptions, followups, order_rollup, kpis = reconcile_all(orders, shipments, tracking)
-except Exception as e:
-    st.error("Reconciliation failed. This usually means a required column is missing after normalization.")
-    st.code(str(e))
+if not st.session_state["run_requested"]:
+    st.info("Make changes above, then click **Run reconciliation** to generate outputs.")
     st.stop()
 
-# AI explanations (safe fallback)
-try:
-    exceptions = enhance_explanations(exceptions)
-except Exception:
-    pass
+# -------------------------------
+# Compute pipeline ONCE per run request (cached in session_state)
+# -------------------------------
+if st.session_state["results_bundle"] is None:
+    # -------------------------------
+    # Normalize
+    # -------------------------------
+    st.divider()
+    st.subheader("Data checks")
 
-# Enrich followups with CRM + add missing supplier contact exceptions
-followups = enrich_followups_with_suppliers(followups, suppliers_df)
-exceptions = add_missing_supplier_contact_exceptions(exceptions, followups)
+    orders, meta_o = normalize_orders(
+        raw_orders,
+        account_id=account_id,
+        store_id=store_id,
+        platform_hint=platform_hint,
+        default_currency=default_currency,
+        default_promised_ship_days=int(default_promised_ship_days),
+    )
+    shipments, meta_s = normalize_shipments(raw_shipments, account_id=account_id, store_id=store_id)
 
-# Add urgency once
-if exceptions is not None and not exceptions.empty and "Urgency" not in exceptions.columns:
-    exceptions = add_urgency_column(exceptions)
+    tracking = pd.DataFrame()
+    meta_t = {"validation_errors": []}
+    if raw_tracking is not None and isinstance(raw_tracking, pd.DataFrame) and not raw_tracking.empty:
+        tracking, meta_t = normalize_tracking(raw_tracking, account_id=account_id, store_id=store_id)
 
-# Scorecard once
-scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
+    errs = meta_o.get("validation_errors", []) + meta_s.get("validation_errors", []) + meta_t.get("validation_errors", [])
+    if errs:
+        st.warning("We found some schema issues. You can still proceed, but fixing these improves accuracy:")
+        for e in errs:
+            st.write("- ", e)
+    else:
+        st.success("Looks good ✅")
 
-# Ops pack once
-pack_date = datetime.now().strftime("%Y%m%d")
-pack_name = f"daily_ops_pack_{pack_date}.zip"
-ops_pack_bytes = make_daily_ops_pack_bytes(
-    exceptions=exceptions if exceptions is not None else pd.DataFrame(),
-    followups=followups if followups is not None else pd.DataFrame(),
-    order_rollup=order_rollup if order_rollup is not None else pd.DataFrame(),
-    line_status_df=line_status_df if line_status_df is not None else pd.DataFrame(),
-    kpis=kpis if isinstance(kpis, dict) else {},
-    supplier_scorecards=scorecard,
-)
+    # -------------------------------
+    # Reconcile
+    # -------------------------------
+    st.divider()
+    st.subheader("Running reconciliation")
+
+    try:
+        line_status_df, exceptions, followups, order_rollup, kpis = reconcile_all(orders, shipments, tracking)
+    except Exception as e:
+        st.error("Reconciliation failed. This usually means a required column is missing after normalization.")
+        st.code(str(e))
+        st.stop()
+
+    # AI explanations (safe fallback)
+    try:
+        exceptions = enhance_explanations(exceptions)
+    except Exception:
+        pass
+
+    # Enrich followups with CRM + add missing supplier contact exceptions
+    followups = enrich_followups_with_suppliers(followups, suppliers_df)
+    exceptions = add_missing_supplier_contact_exceptions(exceptions, followups)
+
+    # Add urgency once
+    if exceptions is not None and not exceptions.empty and "Urgency" not in exceptions.columns:
+        exceptions = add_urgency_column(exceptions)
+
+    # Scorecard once
+    scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
+
+    # Ops pack once
+    pack_date = datetime.now().strftime("%Y%m%d")
+    pack_name = f"daily_ops_pack_{pack_date}.zip"
+    ops_pack_bytes = make_daily_ops_pack_bytes(
+        exceptions=exceptions if exceptions is not None else pd.DataFrame(),
+        followups=followups if followups is not None else pd.DataFrame(),
+        order_rollup=order_rollup if order_rollup is not None else pd.DataFrame(),
+        line_status_df=line_status_df if line_status_df is not None else pd.DataFrame(),
+        kpis=kpis if isinstance(kpis, dict) else {},
+        supplier_scorecards=scorecard,
+    )
+
+    st.session_state["results_bundle"] = {
+        "orders": orders,
+        "shipments": shipments,
+        "tracking": tracking,
+        "line_status_df": line_status_df,
+        "exceptions": exceptions,
+        "followups": followups,
+        "order_rollup": order_rollup,
+        "kpis": kpis,
+        "scorecard": scorecard,
+        "ops_pack_bytes": ops_pack_bytes,
+        "pack_name": pack_name,
+    }
+
+bundle = st.session_state["results_bundle"]
+orders = bundle["orders"]
+shipments = bundle["shipments"]
+tracking = bundle["tracking"]
+line_status_df = bundle["line_status_df"]
+exceptions = bundle["exceptions"]
+followups = bundle["followups"]
+order_rollup = bundle["order_rollup"]
+kpis = bundle["kpis"]
+scorecard = bundle["scorecard"]
+ops_pack_bytes = bundle["ops_pack_bytes"]
+pack_name = bundle["pack_name"]
 
 # -------------------------------
 # Workspaces UI (Save/Load/History/Delete) + optional override if loaded
@@ -247,11 +362,11 @@ exceptions, followups, order_rollup, line_status_df, suppliers_df = render_works
     suppliers_df=suppliers_df,
 )
 
-# Recompute urgency/scorecard if saved run loaded
+# If saved run loaded, ensure urgency/scorecard/ops pack match loaded outputs
 if exceptions is not None and not exceptions.empty and "Urgency" not in exceptions.columns:
     exceptions = add_urgency_column(exceptions)
-scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
 
+scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
 ops_pack_bytes = make_daily_ops_pack_bytes(
     exceptions=exceptions if exceptions is not None else pd.DataFrame(),
     followups=followups if followups is not None else pd.DataFrame(),
