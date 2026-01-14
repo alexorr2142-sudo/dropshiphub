@@ -17,7 +17,9 @@ def render_kpi_trends(workspaces_dir, account_id: str, store_id: str):
     st.subheader("KPI Trends Over Time (from saved runs)")
 
     # UX: explain dependency
-    st.caption("This chart uses your saved runs. Click **Save this run** in the sidebar every day to build trend history.")
+    st.caption(
+        "This chart uses your saved runs. Click **Save this run** in the sidebar every day to build trend history."
+    )
 
     c1, c2 = st.columns(2)
     with c1:
@@ -33,7 +35,9 @@ def render_kpi_trends(workspaces_dir, account_id: str, store_id: str):
 
     # optional filter by workspace
     if show_workspace and "workspace_name" in df.columns:
-        opts = ["(all)"] + sorted([x for x in df["workspace_name"].dropna().unique().tolist() if str(x).strip() != ""])
+        opts = ["(all)"] + sorted(
+            [x for x in df["workspace_name"].dropna().unique().tolist() if str(x).strip() != ""]
+        )
         chosen = st.selectbox("Workspace", opts, index=0, key="kpi_trends_workspace_select")
         if chosen != "(all)":
             df = df[df["workspace_name"] == chosen].copy()
@@ -85,20 +89,33 @@ def render_kpi_trends(workspaces_dir, account_id: str, store_id: str):
     chart_df = chart_df.set_index("run_dt")
     st.line_chart(chart_df)
 
-   with st.expander("See saved KPI history table", expanded=False):
-    show_cols = [
-        "run_id",
-        "workspace_name",
-        "pct_unshipped",
-        "pct_late_unshipped",
-        "pct_delivered",
-        "pct_shipped_or_delivered",
-        "exceptions",
-        "followups",
-        "total_order_lines",
-    ]
-    show_cols = [c for c in show_cols if c in df.columns]
+    # ---- Optional improvement: show run_dt in the table (formatted), and fix KeyError by sorting before column selection
+    with st.expander("See saved KPI history table", expanded=False):
+        view_df = df.copy()
 
-    # sort first (run_dt exists in df but we don't necessarily display it)
-    view_df = df.sort_values("run_dt", ascending=False)
-    st.dataframe(view_df[show_cols], use_container_width=True, height=260)
+        # Format the datetime column nicely for display
+        if "run_dt" in view_df.columns:
+            view_df["run_dt"] = pd.to_datetime(view_df["run_dt"], errors="coerce")
+            view_df["run_date"] = view_df["run_dt"].dt.strftime("%Y-%m-%d %H:%M")
+        else:
+            view_df["run_date"] = ""
+
+        show_cols = [
+            "run_date",  # <- display-friendly timestamp
+            "run_id",
+            "workspace_name",
+            "pct_unshipped",
+            "pct_late_unshipped",
+            "pct_delivered",
+            "pct_shipped_or_delivered",
+            "exceptions",
+            "followups",
+            "total_order_lines",
+        ]
+        show_cols = [c for c in show_cols if c in view_df.columns]
+
+        # Sort first using run_dt (even if we don't display it)
+        if "run_dt" in view_df.columns:
+            view_df = view_df.sort_values("run_dt", ascending=False)
+
+        st.dataframe(view_df[show_cols], use_container_width=True, height=260)
