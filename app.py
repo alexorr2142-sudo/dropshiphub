@@ -194,6 +194,153 @@ def require_email_access_gate():
             "To enable email auth: set Streamlit secret ALLOWED_EMAILS or env var DSH_ALLOWED_EMAILS."
         )
 
+import json
+import io
+import zipfile
+from datetime import datetime
+
+
+def _safe_slug(s: str) -> str:
+    s = (s or "").strip()
+    keep = []
+    for ch in s:
+        if ch.isalnum() or ch in ["-", "_", " "]:
+            keep.append(ch)
+    out = "".join(keep).strip().replace(" ", "_")
+    return out[:60] if out else "workspace"
+
+
+def workspace_root(data_dir: Path, account_id: str, store_id: str) -> Path:
+    return data_dir / "workspaces" / _safe_slug(account_id) / _safe_slug(store_id)
+
+
+def list_runs(ws_root: Path) -> list[dict]:
+    """
+    Returns list of runs [{run_id, path, created_at, workspace_name}...] sorted newest first.
+    """
+    if not ws_root.exists():
+        return []
+
+    runs = []
+    for workspace_dir in ws_root.iterdir():
+        if not workspace_dir.is_dir():
+            continue
+        for run_dir in workspace_dir.iterdir():
+            if not run_dir.is_dir():
+                continue
+            meta_path = run_dir / "meta.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    meta = {}
+            else:
+                meta = {}
+
+            runs.append(
+                {
+                    "workspace_name": workspace_dir.name,
+                    "run_id": run_dir.name,
+                    "path": run_dir,
+                    "created_at": meta.get("created_at", run_dir.name),
+                    "meta": meta,
+                }
+            )
+
+    runs.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return runs
+
+
+def save_run(
+    ws_root: Path,
+    workspace_name: str,
+    account_id: str,
+    store_id: str,
+    platform_hint: str,
+    orders: pd.DataFrame,
+    shipments: pd.DataFrame,
+    tracking: pd.DataFrame,
+    exceptions: pd.DataFrame,
+    followups: pd.DataFrame,
+    order_rollup: pd.DataFrame,
+    line_status_df: pd.DataFrame,
+    kpis: dict,
+) -> Path:
+    """
+    Saves a run to:
+      data/workspaces/<account>/<store>/<workspace>/<run_id>/
+    """
+    workspace_name = _safe_slug(workspace_name)
+    run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    run_dir = ws_root / workspace_name / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save outputs
+    exceptions.to_csv(run_dir / "exceptions.csv", index=False)
+    followups.to_csv(run_dir / "followups.csv", index=False)
+    order_rollup.to_csv(run_dir / "order_rollup.csv", index=False)
+    line_status_df.to_csv(run_dir / "line_status.csv", index=False)
+
+    # Save inputs (optional but useful)
+    orders.to_csv(run_dir / "orders_normalized.csv", index=False)
+    shipments.to_csv(run_dir / "shipments_normalized.csv", index=False)
+    tracking.to_csv(run_dir / "tracking_normalized.csv", index=False)
+
+    meta = {
+        "created_at": run_id,
+        "workspace_name": workspace_name,
+        "account_id": account_id,
+        "store_id": store_id,
+        "platform_hint": platform_hint,
+        "kpis": kpis,
+        "row_counts": {
+            "orders": int(len(orders)),
+            "shipments": int(len(shipments)),
+            "tracking": int(len(tracking)),
+            "exceptions": int(len(exceptions)),
+            "followups": int(len(followups)),
+            "order_rollup": int(len(order_rollup)),
+            "line_status": int(len(line_status_df)),
+        },
+    }
+    (run_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return run_dir
+
+
+def load_run(run_dir: Path) -> dict:
+    """
+    Loads a run from disk and returns dict of dataframes + meta.
+    """
+    out = {}
+    out["meta"] = {}
+    meta_path = run_dir / "meta.json"
+    if meta_path.exists():
+        out["meta"] = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    # outputs
+    out["exceptions"] = pd.read_csv(run_dir / "exceptions.csv") if (run_dir / "exceptions.csv").exists() else pd.DataFrame()
+    out["followups"] = pd.read_csv(run_dir / "followups.csv") if (run_dir / "followups.csv").exists() else pd.DataFrame()
+    out["order_rollup"] = pd.read_csv(run_dir / "order_rollup.csv") if (run_dir / "order_rollup.csv").exists() else pd.DataFrame()
+    out["line_status_df"] = pd.read_csv(run_dir / "line_status.csv") if (run_dir / "line_status.csv").exists() else pd.DataFrame()
+
+    # inputs (optional)
+    out["orders"] = pd.read_csv(run_dir / "orders_normalized.csv") if (run_dir / "orders_normalized.csv").exists() else pd.DataFrame()
+    out["shipments"] = pd.read_csv(run_dir / "shipments_normalized.csv") if (run_dir / "shipments_normalized.csv").exists() else pd.DataFrame()
+    out["tracking"] = pd.read_csv(run_dir / "tracking_normalized.csv") if (run_dir / "tracking_normalized.csv").exists() else pd.DataFrame()
+    return out
+
+
+def make_run_zip_bytes(run_dir: Path) -> bytes:
+    """
+    Zips all files in run_dir and returns bytes.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in run_dir.rglob("*"):
+            if p.is_file():
+                z.write(p, arcname=p.relative_to(run_dir))
+    buf.seek(0)
+    return buf.read()
 
 # -------------------------------
 # Page setup
