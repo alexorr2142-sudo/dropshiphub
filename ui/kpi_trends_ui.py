@@ -85,7 +85,20 @@ def render_kpi_trends(workspaces_dir, account_id: str, store_id: str):
     chart_df = chart_df.set_index("run_dt")
     st.line_chart(chart_df)
 
-    with st.expander("See saved KPI history table", expanded=False):
-        show_cols = ["run_id", "workspace_name", "pct_unshipped", "pct_late_unshipped", "pct_delivered", "pct_shipped_or_delivered", "exceptions", "followups", "total_order_lines"]
-        show_cols = [c for c in show_cols if c in df.columns]
-        st.dataframe(df[show_cols].sort_values("run_dt", ascending=False), use_container_width=True, height=260)
+   with st.expander("See saved KPI history table", expanded=False):
+    show_cols = [
+        "run_id",
+        "workspace_name",
+        "pct_unshipped",
+        "pct_late_unshipped",
+        "pct_delivered",
+        "pct_shipped_or_delivered",
+        "exceptions",
+        "followups",
+        "total_order_lines",
+    ]
+    show_cols = [c for c in show_cols if c in df.columns]
+
+    # sort first (run_dt exists in df but we don't necessarily display it)
+    view_df = df.sort_values("run_dt", ascending=False)
+    st.dataframe(view_df[show_cols], use_container_width=True, height=260)
