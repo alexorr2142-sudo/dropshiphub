@@ -1,94 +1,108 @@
 # ui/issue_tracker_ui.py
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Tuple
-
 import pandas as pd
 import streamlit as st
 
-# ✅ FIXED: top-level import
 from core.issue_tracker import IssueTrackerStore
 
 
-def apply_issue_tracker_fields(df: pd.DataFrame, store: IssueTrackerStore) -> pd.DataFrame:
-    if df is None or df.empty or "issue_id" not in df.columns:
-        return df
+def render_issue_tracker_panel(
+    followups_full: pd.DataFrame,
+    title: str = "Issue Tracker (Resolved + Notes)",
+) -> pd.DataFrame:
+    """
+    Renders a resolved/notes editor and returns followups_full enriched with:
+      - resolved (bool)
+      - notes (str)
 
-    issue_map = store.load()
-    out = df.copy()
-    out["Resolved"] = out["issue_id"].map(lambda k: bool(issue_map.get(str(k), {}).get("resolved", False)))
-    out["Notes"] = out["issue_id"].map(lambda k: str(issue_map.get(str(k), {}).get("notes", "") or ""))
-    return out
+    Requirements:
+      - followups_full must contain 'issue_id' column
+    """
 
+    if followups_full is None or followups_full.empty:
+        st.subheader(title)
+        st.caption("No follow-ups to track.")
+        return followups_full
 
-def filter_unresolved(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty or "Resolved" not in df.columns:
-        return df
-    return df[df["Resolved"] == False].copy()
+    if "issue_id" not in followups_full.columns:
+        st.subheader(title)
+        st.warning("Issue Tracker requires `issue_id` in followups_full.")
+        return followups_full
 
-
-def render_issue_tracker_editor(
-    df: pd.DataFrame,
-    title: str = "Resolved + Notes (Issue Tracker)",
-    key: str = "issue_tracker_editor",
-) -> Tuple[pd.DataFrame, bool]:
     store = IssueTrackerStore()
-    df = apply_issue_tracker_fields(df, store)
+    issue_map = store.load() or {}
+
+    df = followups_full.copy()
+    df["issue_id"] = df["issue_id"].astype(str)
+
+    df["resolved"] = df["issue_id"].map(lambda k: bool((issue_map.get(str(k), {}) or {}).get("resolved", False)))
+    df["notes"] = df["issue_id"].map(lambda k: str((issue_map.get(str(k), {}) or {}).get("notes", "")))
+
+    resolved_count = int(df["resolved"].sum())
+    open_count = int(len(df) - resolved_count)
 
     st.subheader(title)
+    a, b, c = st.columns(3)
+    a.metric("Open", open_count)
+    b.metric("Resolved", resolved_count)
+    c.metric("Total", int(len(df)))
 
-    if df is None or df.empty:
-        st.info("No exception rows to track right now.")
-        return df, False
+    with st.expander("Update resolved status + notes", expanded=False):
+        cols_pref = [
+            "issue_id",
+            "supplier_name",
+            "supplier_email",
+            "order_ids",
+            "item_count",
+            "worst_escalation",
+            "urgency",
+            "resolved",
+            "notes",
+        ]
+        cols_show = [c for c in cols_pref if c in df.columns]
+        work = df[cols_show].copy()
 
-    if "issue_id" not in df.columns:
-        st.warning("Issue tracking requires an issue_id column, but none was found.")
-        return df, False
+        # Keep editor stable
+        work = work.sort_values(["resolved", "supplier_name"] if "supplier_name" in work.columns else ["resolved"])
 
-    c1, c2, _ = st.columns([1, 1, 2])
-    with c1:
-        hide_resolved = st.toggle("Hide resolved", value=True, key=f"{key}_hide")
-    with c2:
-        only_open = st.toggle("Only open", value=True, key=f"{key}_only_open")
+        edited = st.data_editor(
+            work,
+            use_container_width=True,
+            height=320,
+            num_rows="fixed",
+            key="issue_tracker_editor",
+            column_config={
+                "resolved": st.column_config.CheckboxColumn("resolved"),
+                "notes": st.column_config.TextColumn("notes"),
+            },
+        )
 
-    view = df.copy()
-    if hide_resolved or only_open:
-        view = view[view["Resolved"] == False].copy()
+        save1, save2 = st.columns([1, 3])
+        with save1:
+            if st.button("💾 Save changes", use_container_width=True, key="btn_issue_tracker_save"):
+                try:
+                    for _, r in edited.iterrows():
+                        iid = str(r.get("issue_id", "")).strip()
+                        if not iid:
+                            continue
+                        store.upsert(
+                            issue_id=iid,
+                            resolved=bool(r.get("resolved", False)),
+                            notes=str(r.get("notes", "") or ""),
+                        )
+                    st.success("Saved ✅")
+                    st.rerun()
+                except Exception as e:
+                    st.error("Failed to save issue tracker updates.")
+                    st.code(str(e))
 
-    front = ["Resolved", "Notes", "issue_id"]
-    cols = front + [c for c in view.columns if c not in front]
+        with save2:
+            st.caption("Tip: Use this to hide resolved items from OPEN follow-ups while keeping history.")
 
-    edited = st.data_editor(
-        view[cols],
-        use_container_width=True,
-        hide_index=True,
-        disabled=[c for c in cols if c not in ["Resolved", "Notes"]],
-        column_config={
-            "Resolved": st.column_config.CheckboxColumn("Resolved"),
-            "Notes": st.column_config.TextColumn("Notes", width="large"),
-            "issue_id": st.column_config.TextColumn("issue_id", width="medium"),
-        },
-        key=key,
-    )
-
-    saved = False
-    if st.button("Save Issue Updates", type="primary", key=f"{key}_save"):
-        issue_map = store.load()
-        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
-        for _, r in edited.iterrows():
-            iid = str(r.get("issue_id", "")).strip()
-            if not iid:
-                continue
-            issue_map[iid] = {
-                "resolved": bool(r.get("Resolved", False)),
-                "notes": str(r.get("Notes", "") or ""),
-                "updated_at": now,
-            }
-
-        store.save(issue_map)
-        st.success("Saved issue tracker updates.")
-        saved = True
-
-    return edited, saved
+    # Merge the latest resolved/notes back into full df
+    # (In case user edited in the same render pass)
+    latest_map = store.load() or {}
+    df["resolved"] = df["issue_id"].map(lambda k: bool((latest_map.get(str(k), {}) or {}).get("resolved", False)))
+    df["notes"] = df["issue_id"].map(lambda k: str((latest_map.get(str(k), {}) or {}).get("notes", "")))
+    return df
