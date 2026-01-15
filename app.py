@@ -10,6 +10,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+# ✅ NEW: used to keep resolved items resolved even when loading saved runs
+from core.issue_tracker import IssueTrackerStore
+
 
 # ============================================================
 # Robust imports (works whether you kept old flat files or moved
@@ -67,14 +70,8 @@ def _import_or_stop():
     try:
         from core.urgency import add_urgency_column, style_exceptions_table  # type: ignore
     except Exception:
-        try:
-            # If you still kept these inside app.py earlier, we can’t import them
-            # so we will just not style/urgency unless you have them as modules.
-            add_urgency_column = None
-            style_exceptions_table = None
-        except Exception:
-            add_urgency_column = None
-            style_exceptions_table = None
+        add_urgency_column = None
+        style_exceptions_table = None
 
     # ---- Feature UIs ----
     render_daily_action_list = None
@@ -119,7 +116,7 @@ def _import_or_stop():
     except Exception:
         build_supplier_accountability_view = None
 
-    # ✅ SLA Escalations (the change you asked for)
+    # ✅ SLA Escalations + Issue Tracker UI
     render_sla_escalations = None
     try:
         from ui.sla_escalations_ui import render_sla_escalations  # type: ignore
@@ -266,9 +263,6 @@ require_email_access_gate()
 # ============================================================
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-# ✅ issue tracker persistence lives under data/ too
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 WORKSPACES_DIR = DATA_DIR / "workspaces"
@@ -460,17 +454,30 @@ tracking_template = pd.DataFrame(
         "Exception",
     ]
 )
-suppliers_template = pd.DataFrame(
-    columns=["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"]
-)
+suppliers_template = pd.DataFrame(columns=["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"])
 
 t1, t2, t3 = st.columns(3)
 with t1:
-    st.download_button("Shipments template CSV", data=shipments_template.to_csv(index=False).encode("utf-8"), file_name="shipments_template.csv", mime="text/csv")
+    st.download_button(
+        "Shipments template CSV",
+        data=shipments_template.to_csv(index=False).encode("utf-8"),
+        file_name="shipments_template.csv",
+        mime="text/csv",
+    )
 with t2:
-    st.download_button("Tracking template CSV", data=tracking_template.to_csv(index=False).encode("utf-8"), file_name="tracking_template.csv", mime="text/csv")
+    st.download_button(
+        "Tracking template CSV",
+        data=tracking_template.to_csv(index=False).encode("utf-8"),
+        file_name="tracking_template.csv",
+        mime="text/csv",
+    )
 with t3:
-    st.download_button("Suppliers template CSV", data=suppliers_template.to_csv(index=False).encode("utf-8"), file_name="suppliers_template.csv", mime="text/csv")
+    st.download_button(
+        "Suppliers template CSV",
+        data=suppliers_template.to_csv(index=False).encode("utf-8"),
+        file_name="suppliers_template.csv",
+        mime="text/csv",
+    )
 
 
 # ============================================================
@@ -550,10 +557,10 @@ if MOD["add_missing_supplier_contact_exceptions"] is not None:
 
 
 # ============================================================
-# SLA Escalations + Issue Tracker (✅ UPDATED FOR NEW RETURN VALUES)
+# SLA Escalations + Issue Tracker
 # Place this AFTER followups exist and AFTER CRM enrichment
 # ============================================================
-followups_full = followups  # will keep the "full" version (with issue fields, resolved/notes)
+followups_full = followups  # full snapshot (includes issue_id + notes/resolved when available)
 followups_open = followups  # operational list (unresolved only)
 
 if MOD["render_sla_escalations"] is not None:
@@ -563,24 +570,21 @@ if MOD["render_sla_escalations"] is not None:
             followups=followups,
             promised_ship_days=int(default_promised_ship_days),
         )
-        # ✅ Downstream operational behavior should use open only
-        followups = followups_open
+        followups = followups_open  # downstream behavior uses open-only
     except TypeError:
-        # Backward compatibility if UI signature differs
         out = MOD["render_sla_escalations"](
             line_status_df=line_status_df,
             followups=followups,
             promised_ship_days=int(default_promised_ship_days),
         )
-        # If old UI returns just a df, keep prior behavior
         if isinstance(out, tuple) and len(out) >= 2:
             followups_full = out[1]
-            followups = out[1]
             followups_open = out[1]
+            followups = out[1]
         else:
             followups_full = out
-            followups = out
             followups_open = out
+            followups = out
 else:
     st.warning("SLA escalations UI not found. Create ui/sla_escalations_ui.py + core/sla_escalations.py to enable.")
 
@@ -613,9 +617,7 @@ if MOD["workspace_root"] is not None:
                 shipments=shipments,
                 tracking=tracking,
                 exceptions=exceptions,
-                # ✅ Save the full followups snapshot (better history),
-                # but operational UI uses followups_open below.
-                followups=followups_full,
+                followups=followups_full,  # ✅ save full snapshot
                 order_rollup=order_rollup,
                 line_status_df=line_status_df,
                 kpis=kpis,
@@ -631,7 +633,12 @@ if MOD["workspace_root"] is not None:
                 f"{r['workspace_name']} / {r['run_id']}  (exceptions: {r.get('meta', {}).get('row_counts', {}).get('exceptions', '?')})"
                 for r in runs
             ]
-            chosen_idx = st.selectbox("Load previous run", options=list(range(len(runs))), format_func=lambda i: run_labels[i], key="ws_load_select")
+            chosen_idx = st.selectbox(
+                "Load previous run",
+                options=list(range(len(runs))),
+                format_func=lambda i: run_labels[i],
+                key="ws_load_select",
+            )
 
             cL1, cL2 = st.columns(2)
             with cL1:
@@ -656,7 +663,12 @@ if MOD["workspace_root"] is not None:
 
                 st.divider()
                 st.markdown("**Delete a saved run**")
-                delete_idx = st.selectbox("Select run to delete", options=list(range(len(runs))), format_func=lambda i: f"{runs[i]['workspace_name']} / {runs[i]['run_id']}", key="ws_delete_select")
+                delete_idx = st.selectbox(
+                    "Select run to delete",
+                    options=list(range(len(runs))),
+                    format_func=lambda i: f"{runs[i]['workspace_name']} / {runs[i]['run_id']}",
+                    key="ws_delete_select",
+                )
                 confirm = st.checkbox("I understand this cannot be undone", key="ws_delete_confirm")
                 if st.button("🗑️ Delete run", disabled=not confirm, key="btn_delete_run"):
                     target = Path(runs[delete_idx]["path"])
@@ -669,14 +681,28 @@ if MOD["workspace_root"] is not None:
         else:
             st.caption("No saved runs yet. Click **Save this run** to create your first run history entry.")
 
-    # If a run is loaded, override outputs (+ suppliers snapshot if present)
+    # ✅ If a run is loaded, override outputs (+ suppliers snapshot if present)
     if st.session_state.get("loaded_run"):
         loaded = MOD["load_run"](Path(st.session_state["loaded_run"]))
         exceptions = loaded.get("exceptions", exceptions)
-        # ✅ Load the saved snapshot (full), but re-derive open for operational
+
+        # ✅ Load full snapshot
         followups_full = loaded.get("followups", followups_full)
-        followups = followups_full
-        followups_open = followups_full  # fallback; open filtering is done inside SLA UI each run
+
+        # ✅ NEW: Re-derive OPEN followups using issue_tracker.json
+        store = IssueTrackerStore()
+        issue_map = store.load()
+
+        followups_open = followups_full.copy() if followups_full is not None else pd.DataFrame()
+        if followups_open is not None and not followups_open.empty and "issue_id" in followups_open.columns:
+            followups_open["_resolved_tmp"] = followups_open["issue_id"].map(
+                lambda k: bool(issue_map.get(str(k), {}).get("resolved", False))
+            )
+            followups_open = followups_open[followups_open["_resolved_tmp"] == False].copy()
+            followups_open = followups_open.drop(columns=["_resolved_tmp"], errors="ignore")
+
+        # ✅ Operational followups everywhere else should be open-only
+        followups = followups_open
 
         order_rollup = loaded.get("order_rollup", order_rollup)
         line_status_df = loaded.get("line_status_df", line_status_df)
@@ -716,7 +742,6 @@ if MOD["make_daily_ops_pack_bytes"] is not None:
         pack_name = f"daily_ops_pack_{pack_date}.zip"
         ops_pack_bytes = MOD["make_daily_ops_pack_bytes"](
             exceptions=exceptions if exceptions is not None else pd.DataFrame(),
-            # ✅ Ops pack should use OPEN followups (unresolved)
             followups=followups_open if followups_open is not None else (followups if followups is not None else pd.DataFrame()),
             order_rollup=order_rollup if order_rollup is not None else pd.DataFrame(),
             line_status_df=line_status_df if line_status_df is not None else pd.DataFrame(),
@@ -757,8 +782,11 @@ k5.metric("% Late Unshipped", f"{(kpis or {}).get('pct_late_unshipped', 0)}%")
 # Feature: Daily Action List
 # ============================================================
 if MOD["build_daily_action_list"] is not None and MOD["render_daily_action_list"] is not None:
-    # ✅ Use OPEN followups (unresolved)
-    actions = MOD["build_daily_action_list"](exceptions=exceptions, followups=followups_open if followups_open is not None else followups, max_items=10)
+    actions = MOD["build_daily_action_list"](
+        exceptions=exceptions,
+        followups=followups_open if followups_open is not None else followups,
+        max_items=10,
+    )
     MOD["render_daily_action_list"](actions)
 
 
@@ -773,7 +801,6 @@ if MOD["render_kpi_trends"] is not None:
             store_id=store_id,
         )
     except TypeError:
-        # some versions take DATA_DIR or ws_root; if yours differs, you can adjust
         pass
 
 
@@ -791,12 +818,14 @@ if MOD["render_customer_impact_view"] is not None:
     MOD["render_customer_impact_view"](customer_impact)
 
 if MOD["render_comms_pack_download"] is not None:
-    # ✅ Comms pack should use OPEN followups (unresolved)
-    MOD["render_comms_pack_download"](followups=followups_open if followups_open is not None else followups, customer_impact=customer_impact)
+    MOD["render_comms_pack_download"](
+        followups=followups_open if followups_open is not None else followups,
+        customer_impact=customer_impact,
+    )
 
 
 # ============================================================
-# Supplier Accountability (keep your current one)
+# Supplier Accountability
 # ============================================================
 if MOD["build_supplier_accountability_view"] is not None and MOD["render_supplier_accountability"] is not None:
     try:
@@ -885,7 +914,6 @@ else:
 st.divider()
 st.subheader("Supplier Follow-ups (Copy/Paste Ready)")
 
-# ✅ Always prefer unresolved list if available
 followups_for_ops = followups_open if followups_open is not None else followups
 
 if followups_for_ops is None or followups_for_ops.empty:
@@ -944,7 +972,12 @@ else:
 st.divider()
 st.subheader("Order-Level Rollup (One row per order)")
 st.dataframe(order_rollup, use_container_width=True, height=320)
-st.download_button("Download Order Rollup CSV", data=order_rollup.to_csv(index=False).encode("utf-8"), file_name="order_rollup.csv", mime="text/csv")
+st.download_button(
+    "Download Order Rollup CSV",
+    data=order_rollup.to_csv(index=False).encode("utf-8"),
+    file_name="order_rollup.csv",
+    mime="text/csv",
+)
 
 
 # ============================================================
@@ -953,7 +986,11 @@ st.download_button("Download Order Rollup CSV", data=order_rollup.to_csv(index=F
 st.divider()
 st.subheader("All Order Lines (Normalized + Status)")
 st.dataframe(line_status_df, use_container_width=True, height=380)
-st.download_button("Download Line Status CSV", data=line_status_df.to_csv(index=False).encode("utf-8"), file_name="order_line_status.csv", mime="text/csv")
-
+st.download_button(
+    "Download Line Status CSV",
+    data=line_status_df.to_csv(index=False).encode("utf-8"),
+    file_name="order_line_status.csv",
+    mime="text/csv",
+)
 
 st.caption("MVP note: This version uses CSV uploads. Integrations + automation can be added after early-user feedback.")
