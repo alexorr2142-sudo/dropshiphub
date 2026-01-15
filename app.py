@@ -45,30 +45,21 @@ render_kpi_trends = None
 build_supplier_accountability_view = None
 render_supplier_accountability = None
 
-
-build_customer_impact_view = None
-render_customer_impact_view = None
-
-render_customer_comms_ui = None
-render_comms_pack_download = None
-
-build_daily_action_list = None
-render_daily_action_list = None
-
-render_kpi_trends = None
-
-build_supplier_accountability_view = None
-render_supplier_accountability = None
-
 try:
     from ui.sla_escalations_ui import render_sla_escalations  # type: ignore
 except Exception:
     render_sla_escalations = None
 
 try:
-    from core.issue_tracker import IssueTrackerStore  # type: ignore
+    from core.issue_tracker import IssueTrackerStore, CONTACT_STATUSES  # type: ignore
 except Exception:
     IssueTrackerStore = None
+    CONTACT_STATUSES = ["Not Contacted", "Contacted", "Waiting", "Escalated", "Resolved"]
+
+try:
+    from core.email_utils import mailto_link  # type: ignore
+except Exception:
+    mailto_link = None
 
 try:
     from core.customer_impact import build_customer_impact_view  # type: ignore
@@ -870,7 +861,7 @@ with st.sidebar:
                 _init_demo_tables_if_needed(DATA_DIR)
                 st.rerun()
 
-    # Issue Tracker maintenance
+    # Issue Tracker maintenance (per-tenant store file)
     if IssueTrackerStore is not None:
         st.divider()
         with st.expander("Issue Tracker Maintenance", expanded=False):
@@ -885,13 +876,15 @@ with st.sidebar:
             cmt1, cmt2 = st.columns(2)
             with cmt1:
                 if st.button("🧹 Prune old resolved", use_container_width=True, key="btn_issue_prune"):
-                    store = IssueTrackerStore()
+                    ws_root_for_store = workspace_root(WORKSPACES_DIR, account_id, store_id)
+                    store = IssueTrackerStore(Path(ws_root_for_store) / "issue_tracker.json")
                     removed = store.prune_resolved_older_than_days(int(prune_days))
                     st.success(f"Pruned {removed} resolved item(s).")
                     st.rerun()
             with cmt2:
                 if st.button("🗑️ Clear ALL resolved", use_container_width=True, key="btn_issue_clear"):
-                    store = IssueTrackerStore()
+                    ws_root_for_store = workspace_root(WORKSPACES_DIR, account_id, store_id)
+                    store = IssueTrackerStore(Path(ws_root_for_store) / "issue_tracker.json")
                     removed = store.clear_resolved()
                     st.success(f"Cleared {removed} resolved item(s).")
                     st.rerun()
@@ -929,6 +922,7 @@ with st.expander("Diagnostics", expanded=False):
     diag = {
         "render_sla_escalations": render_sla_escalations is not None,
         "IssueTrackerStore": IssueTrackerStore is not None,
+        "mailto_link": mailto_link is not None,
         "build_customer_impact_view": build_customer_impact_view is not None,
         "render_customer_impact_view": render_customer_impact_view is not None,
         "render_customer_comms_ui": render_customer_comms_ui is not None,
@@ -1162,9 +1156,10 @@ if render_sla_escalations is not None:
     except Exception:
         pass
 
-# OPEN derived from FULL via Issue Tracker flags
+# OPEN derived from FULL via Issue Tracker flags (per-tenant)
 if IssueTrackerStore is not None and not followups_full.empty and "issue_id" in followups_full.columns:
-    store = IssueTrackerStore()
+    ws_root_for_store = workspace_root(WORKSPACES_DIR, account_id, store_id)
+    store = IssueTrackerStore(Path(ws_root_for_store) / "issue_tracker.json")
     issue_map = store.load()
 
     followups_open = followups_full.copy()
@@ -1184,6 +1179,10 @@ followups = followups_open
 # -------------------------------
 ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
 ws_root.mkdir(parents=True, exist_ok=True)
+ISSUE_TRACKER_PATH = Path(ws_root) / "issue_tracker.json"
+
+if IssueTrackerStore is not None:
+    st.caption(f"Issue tracker file: `{ISSUE_TRACKER_PATH.as_posix()}`")
 
 if "loaded_run" not in st.session_state:
     st.session_state["loaded_run"] = None
@@ -1282,7 +1281,7 @@ if st.session_state.get("loaded_run"):
         st.session_state["suppliers_df"] = loaded_suppliers
 
     if IssueTrackerStore is not None and isinstance(followups_full, pd.DataFrame) and not followups_full.empty and "issue_id" in followups_full.columns:
-        store = IssueTrackerStore()
+        store = IssueTrackerStore(ISSUE_TRACKER_PATH)
         issue_map = store.load()
 
         followups_open = followups_full.copy()
@@ -1453,8 +1452,30 @@ with tab1:
     if followups_for_ops is None or followups_for_ops.empty:
         st.info("No supplier follow-ups needed.")
     else:
-        summary_cols = [c for c in ["supplier_name", "supplier_email", "worst_escalation", "urgency", "item_count", "order_ids"] if c in followups_for_ops.columns]
-        st.dataframe(followups_for_ops[summary_cols] if summary_cols else followups_for_ops, use_container_width=True, height=220)
+        # --- Add contact status + follow-up count columns (per issue_id) ---
+        show_df = followups_for_ops.copy()
+        if IssueTrackerStore is not None and "issue_id" in show_df.columns:
+            store = IssueTrackerStore(ISSUE_TRACKER_PATH)
+            issue_map = store.load()
+
+            def _contact_status(iid: str) -> str:
+                rec = issue_map.get(str(iid), {}) if isinstance(issue_map.get(str(iid), {}), dict) else {}
+                c = rec.get("contact", {}) if isinstance(rec.get("contact", {}), dict) else {}
+                return str(c.get("status", "Not Contacted") or "Not Contacted")
+
+            def _followups(iid: str) -> int:
+                rec = issue_map.get(str(iid), {}) if isinstance(issue_map.get(str(iid), {}), dict) else {}
+                c = rec.get("contact", {}) if isinstance(rec.get("contact", {}), dict) else {}
+                try:
+                    return int(c.get("follow_up_count", 0) or 0)
+                except Exception:
+                    return 0
+
+            show_df["contact_status"] = show_df["issue_id"].astype(str).map(_contact_status)
+            show_df["follow_up_count"] = show_df["issue_id"].astype(str).map(_followups)
+
+        summary_cols = [c for c in ["supplier_name", "supplier_email", "worst_escalation", "urgency", "item_count", "order_ids", "contact_status", "follow_up_count"] if c in show_df.columns]
+        st.dataframe(show_df[summary_cols] if summary_cols else show_df, use_container_width=True, height=220)
 
         # Supplier email preview + 3 bullet questions generator
         if "supplier_name" in followups_for_ops.columns and len(followups_for_ops) > 0:
@@ -1508,6 +1529,63 @@ with tab1:
                 mime="text/plain",
                 key="btn_download_supplier_email_txt",
             )
+
+            # -------------------------------
+            # NEW: One-click compose + Follow-up tracking
+            # -------------------------------
+            if IssueTrackerStore is not None and mailto_link is not None:
+                store = IssueTrackerStore(ISSUE_TRACKER_PATH)
+
+                issue_ids = []
+                if "issue_id" in followups_for_ops.columns:
+                    issue_ids = (
+                        followups_for_ops.loc[followups_for_ops["supplier_name"] == chosen, "issue_id"]
+                        .dropna()
+                        .astype(str)
+                        .tolist()
+                    )
+
+                compose_url = mailto_link(supplier_email, subj, body)
+
+                ccA, ccB, ccC = st.columns(3)
+                with ccA:
+                    # Streamlit link button is optional; markdown works everywhere
+                    try:
+                        st.link_button("📧 One-click compose email", compose_url, use_container_width=True)
+                    except Exception:
+                        st.markdown(f"[📧 One-click compose email]({compose_url})")
+                    st.caption("Opens your email app with To/Subject/Body filled")
+
+                with ccB:
+                    if st.button("✅ Mark contacted", key=f"btn_mark_contacted_{chosen}"):
+                        for iid in issue_ids:
+                            store.mark_contacted(
+                                iid,
+                                channel="email",
+                                note=f"Supplier email composed/sent to {supplier_email}",
+                                new_status="Contacted",
+                            )
+                        st.success(f"Recorded contacted for {len(issue_ids)} issue(s).")
+                        st.rerun()
+
+                with ccC:
+                    if st.button("🔁 Follow-up +1", key=f"btn_followup_plus1_{chosen}"):
+                        for iid in issue_ids:
+                            store.increment_followup(iid, channel="email", note="Follow-up sent")
+                        st.success(f"Recorded follow-up for {len(issue_ids)} issue(s).")
+                        st.rerun()
+
+                new_status = st.selectbox(
+                    "Set supplier issue status",
+                    CONTACT_STATUSES,
+                    index=CONTACT_STATUSES.index("Waiting") if "Waiting" in CONTACT_STATUSES else 0,
+                    key=f"status_bulk_{chosen}",
+                )
+                if st.button("Save status for all supplier issues", key=f"btn_status_bulk_{chosen}"):
+                    for iid in issue_ids:
+                        store.set_contact_status(iid, new_status)
+                    st.success(f"Set status to {new_status} for {len(issue_ids)} issue(s).")
+                    st.rerun()
 
         # ✅ Supplier accountability: correct signature build_supplier_accountability_view(scorecard, top_n=10)
         if build_supplier_accountability_view is not None and render_supplier_accountability is not None:
