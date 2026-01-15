@@ -1,51 +1,97 @@
-# ui/supplier_accountability_ui.py
+# dropshiphub/ui/sla_escalations_ui.py
+from __future__ import annotations
+
 import pandas as pd
 import streamlit as st
 
-from core.styling import copy_button
-from core.supplier_accountability import draft_supplier_performance_note
+from dropshiphub.core.sla_escalations import build_sla_escalations
+from dropshiphub.core.issue_tracker import IssueTrackerStore
+from dropshiphub.ui.issue_tracker_ui import (
+    render_issue_tracker_editor,
+    apply_issue_tracker_fields,
+    filter_unresolved,
+)
 
 
-def render_supplier_accountability(view_df: pd.DataFrame):
-    st.divider()
-    st.subheader("Supplier Accountability Mode (Who is causing issues?)")
+def render_sla_escalations(
+    line_status_df: pd.DataFrame,
+    followups: pd.DataFrame,
+    promised_ship_days: int = 3,
+    grace_days: int = 0,
+    at_risk_hours: int = 72,
+):
+    """
+    Step 3B: Wires the Issue Tracker (Resolved + Notes) into the SLA Exceptions UI.
 
-    if view_df is None or view_df.empty:
-        st.info("No supplier scorecard data available yet (requires supplier_name in line status).")
-        return
+    Inputs:
+      - line_status_df: your line-level status table
+      - followups: your followups table (row-level preferred; supplier-level still works)
+      - promised_ship_days, grace_days, at_risk_hours: SLA settings
 
-    st.caption("Ranked by a weighted pain score (critical/high + tracking/late + exception rate).")
-    st.dataframe(view_df, use_container_width=True, height=300)
+    Returns:
+      (escalations_df, updated_followups_df, open_followups_df)
+        - updated_followups_df includes worst_escalation + issue_id (from Step 2) + Resolved/Notes (from store)
+        - open_followups_df filters out Resolved == True for operational use (emails, chasing, etc.)
+    """
+    st.header("SLA Exceptions")
 
-    st.download_button(
-        "Download Supplier Accountability CSV",
-        data=view_df.to_csv(index=False).encode("utf-8"),
-        file_name="supplier_accountability.csv",
-        mime="text/csv",
+    # -------------------------------
+    # Build escalations + followups
+    # -------------------------------
+    escalations_df, updated_followups = build_sla_escalations(
+        line_status_df=line_status_df,
+        followups=followups,
+        promised_ship_days=int(promised_ship_days),
+        grace_days=int(grace_days),
+        at_risk_hours=int(at_risk_hours),
     )
 
-    st.divider()
-    st.markdown("### Supplier performance note (copy/paste)")
+    # -------------------------------
+    # Supplier escalation summary
+    # -------------------------------
+    st.subheader("Supplier Escalation Summary")
+    if escalations_df is None or escalations_df.empty:
+        st.info("No open SLA exceptions found.")
+    else:
+        st.dataframe(escalations_df, use_container_width=True, hide_index=True)
 
-    options = list(range(len(view_df)))
-    idx = st.selectbox(
-        "Choose supplier",
-        options=options,
-        format_func=lambda i: str(view_df.iloc[i].get("supplier_name", "")),
-        key="supplier_accountability_select",
+    # -------------------------------
+    # Step 3B: Issue Tracker (Resolved + Notes)
+    # -------------------------------
+    st.divider()
+
+    # Ensure folder exists (safe no-op if already exists)
+    # (If you already do this in app.py, you can remove this.)
+    from pathlib import Path
+    Path("data").mkdir(parents=True, exist_ok=True)
+
+    # Attach current saved state (Resolved/Notes) before editor
+    store = IssueTrackerStore()
+    updated_followups = apply_issue_tracker_fields(updated_followups, store)
+
+    # Render editor that can update Resolved + Notes
+    edited_followups, saved = render_issue_tracker_editor(
+        updated_followups if updated_followups is not None else pd.DataFrame(),
+        title="Resolved + Notes (Issue Tracker)",
+        key="exceptions_issue_tracker",
     )
 
-    row = view_df.iloc[int(idx)].to_dict()
-    note = draft_supplier_performance_note(row)
+    # Re-apply fields after save (so the page reflects persisted state immediately)
+    if saved:
+        edited_followups = apply_issue_tracker_fields(edited_followups, store)
 
-    subject = note.get("subject", "")
-    body = note.get("body", "")
+    # Operational “open” list for downstream logic (emails, chasing, etc.)
+    open_followups = filter_unresolved(edited_followups)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        copy_button(subject, "Copy subject", key=f"copy_supplier_perf_subject_{idx}")
-    with c2:
-        copy_button(body, "Copy body", key=f"copy_supplier_perf_body_{idx}")
+    # -------------------------------
+    # Show Open Followups (what you act on)
+    # -------------------------------
+    st.subheader("Open Followups (Unresolved Only)")
+    if open_followups is None or open_followups.empty:
+        st.success("Nothing open — all exceptions are resolved (or none exist).")
+    else:
+        st.dataframe(open_followups, use_container_width=True, hide_index=True)
+        st.caption(f"Open items: {len(open_followups)}")
 
-    st.text_input("Subject", value=subject, key="supplier_perf_subject_preview")
-    st.text_area("Body", value=body, height=220, key="supplier_perf_body_preview")
+    # Return these so app.py (or other UI sections) can use open_followups for emails/templates
+    return escalations_df, edited_followups, open_followups
