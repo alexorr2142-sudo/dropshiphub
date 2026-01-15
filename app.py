@@ -773,14 +773,6 @@ def _reset_demo_tables(data_dir: Path):
 # ============================================================
 st.set_page_config(page_title="Dropship Hub", layout="wide")
 
-ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
-
-if not PUBLIC_REVIEW_MODE:
-    code = st.text_input("Enter early access code", type="password", key="auth_access_code")
-    if code != ACCESS_CODE:
-        st.info("This app is currently in early access. Enter your code to continue.")
-        st.stop()
-
 require_email_access_gate()
 
 
