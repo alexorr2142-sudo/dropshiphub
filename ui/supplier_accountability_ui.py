@@ -756,7 +756,7 @@ ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
 st.title("Dropship Hub — Early Access")
 st.caption("Drop ship made easy — exceptions, follow-ups, and visibility in one hub.")
 
-code = st.text_input("Enter early access code", type="password", key="access_code")
+code = st.text_input("Enter early access code", type="password", key="early_access_code")
 if code != ACCESS_CODE:
     st.info("This app is currently in early access. Enter your code to continue.")
     st.stop()
