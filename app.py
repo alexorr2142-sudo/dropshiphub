@@ -14,6 +14,337 @@ import streamlit.components.v1 as components
 
 
 # ============================================================
+# 🔓 PUBLIC REVIEW MODE (TEMP)
+# Set to True to bypass access code + email allowlist
+# Set back to False after review
+# ============================================================
+PUBLIC_REVIEW_MODE = True
+
+
+# ============================================================
+# Optional feature imports (do NOT crash if missing)
+# ============================================================
+render_sla_escalations = None
+IssueTrackerStore = None
+
+build_customer_impact_view = None
+render_customer_impact_view = None
+
+render_customer_comms_ui = None
+render_comms_pack_download = None
+
+build_daily_action_list = None
+render_daily_action_list = None
+
+render_kpi_trends = None
+
+build_supplier_accountability_view = None
+render_supplier_accountability = None
+
+try:
+    from ui.sla_escalations_ui import render_sla_escalations  # type: ignore
+except Exception:
+    render_sla_escalations = None
+
+try:
+    from core.issue_tracker import IssueTrackerStore  # type: ignore
+except Exception:
+    IssueTrackerStore = None
+
+try:
+    from core.customer_impact import build_customer_impact_view  # type: ignore
+except Exception:
+    build_customer_impact_view = None
+
+try:
+    from ui.customer_impact_ui import render_customer_impact_view  # type: ignore
+except Exception:
+    render_customer_impact_view = None
+
+try:
+    from ui.customer_comms_ui import render_customer_comms_ui  # type: ignore
+except Exception:
+    render_customer_comms_ui = None
+
+try:
+    from ui.comms_pack_ui import render_comms_pack_download  # type: ignore
+except Exception:
+    render_comms_pack_download = None
+
+try:
+    from core.actions import build_daily_action_list  # type: ignore
+except Exception:
+    build_daily_action_list = None
+
+try:
+    from ui.actions_ui import render_daily_action_list  # type: ignore
+except Exception:
+    render_daily_action_list = None
+
+try:
+    from ui.kpi_trends_ui import render_kpi_trends  # type: ignore
+except Exception:
+    render_kpi_trends = None
+
+try:
+    from core.supplier_accountability import build_supplier_accountability_view  # type: ignore
+except Exception:
+    build_supplier_accountability_view = None
+
+try:
+    from ui.supplier_accountability_ui import render_supplier_accountability  # type: ignore
+except Exception:
+    render_supplier_accountability = None
+
+
+# --- Local modules (your repo files) ---
+try:
+    from normalize import normalize_orders, normalize_shipments, normalize_tracking
+    from reconcile import reconcile_all
+    from explain import enhance_explanations
+except Exception as e:
+    st.set_page_config(page_title="Dropship Hub", layout="wide")
+    st.title("Dropship Hub")
+    st.error("Import error: one of your local .py files is missing or has an error.")
+    st.code(str(e))
+    st.stop()
+
+
+# ============================================================
+# Helpers
+# ============================================================
+def copy_button(text: str, label: str, key: str):
+    safe_text = (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace("`", "\\`")
+        .replace("${", "\\${")
+    )
+    html = f"""
+    <div style="margin: 0.25rem 0;">
+      <button
+        id="btn-{key}"
+        style="
+          padding: 0.45rem 0.75rem;
+          border-radius: 0.5rem;
+          border: 1px solid rgba(49, 51, 63, 0.2);
+          background: white;
+          cursor: pointer;
+          font-size: 0.9rem;
+        "
+        onclick="navigator.clipboard.writeText(`{safe_text}`)
+          .then(() => {{
+            const b = document.getElementById('btn-{key}');
+            const old = b.innerText;
+            b.innerText = 'Copied ✅';
+            setTimeout(() => b.innerText = old, 1200);
+          }})
+          .catch(() => alert('Copy failed. Your browser may block clipboard access.'));"
+      >
+        {label}
+      </button>
+    </div>
+    """
+    components.html(html, height=55)
+
+
+def call_with_accepted_kwargs(fn, **kwargs):
+    sig = inspect.signature(fn)
+    accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    return fn(**accepted)
+
+
+def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
+    df = exceptions_df.copy()
+
+    def classify_row(row) -> str:
+        issue_type = str(row.get("issue_type", "")).lower()
+        explanation = str(row.get("explanation", "")).lower()
+        next_action = str(row.get("next_action", "")).lower()
+        risk = str(row.get("customer_risk", "")).lower()
+        line_status = str(row.get("line_status", "")).lower()
+        blob = " ".join([issue_type, explanation, next_action, risk, line_status])
+
+        critical_terms = [
+            "late", "past due", "overdue", "late unshipped",
+            "missing tracking", "no tracking", "tracking missing",
+            "carrier exception", "exception", "lost", "stuck", "seized",
+            "returned to sender", "address missing", "missing address",
+        ]
+        if any(t in blob for t in critical_terms):
+            return "Critical"
+
+        high_terms = [
+            "partial", "partial shipment",
+            "mismatch", "quantity mismatch",
+            "invalid tracking", "tracking invalid",
+            "carrier unknown", "unknown carrier",
+        ]
+        if any(t in blob for t in high_terms):
+            return "High"
+
+        medium_terms = ["verify", "check", "confirm", "format", "invalid", "missing", "contact"]
+        if any(t in blob for t in medium_terms):
+            return "Medium"
+
+        return "Low"
+
+    df["Urgency"] = df.apply(classify_row, axis=1)
+    df["Urgency"] = pd.Categorical(df["Urgency"], categories=["Critical", "High", "Medium", "Low"], ordered=True)
+    return df
+
+
+def style_exceptions_table(df: pd.DataFrame):
+    if "Urgency" not in df.columns:
+        return df.style
+
+    colors = {
+        "Critical": "background-color: #ffd6d6;",
+        "High": "background-color: #fff1cc;",
+        "Medium": "background-color: #f3f3f3;",
+        "Low": ""
+    }
+
+    def row_style(row):
+        u = str(row.get("Urgency", "Low"))
+        return [colors.get(u, "")] * len(row)
+
+    return df.style.apply(row_style, axis=1)
+
+
+def make_daily_ops_pack_bytes(
+    exceptions: pd.DataFrame,
+    followups: pd.DataFrame,
+    order_rollup: pd.DataFrame,
+    line_status_df: pd.DataFrame,
+    kpis: dict,
+    supplier_scorecards: pd.DataFrame | None = None,
+    customer_impact: pd.DataFrame | None = None,
+) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("exceptions.csv", (exceptions if exceptions is not None else pd.DataFrame()).to_csv(index=False))
+        z.writestr("supplier_followups.csv", (followups if followups is not None else pd.DataFrame()).to_csv(index=False))
+        z.writestr("order_rollup.csv", (order_rollup if order_rollup is not None else pd.DataFrame()).to_csv(index=False))
+        z.writestr("order_line_status.csv", (line_status_df if line_status_df is not None else pd.DataFrame()).to_csv(index=False))
+
+        if supplier_scorecards is not None and not supplier_scorecards.empty:
+            z.writestr("supplier_scorecards.csv", supplier_scorecards.to_csv(index=False))
+
+        if customer_impact is not None and not customer_impact.empty:
+            z.writestr("customer_impact.csv", customer_impact.to_csv(index=False))
+
+        z.writestr("kpis.json", json.dumps(kpis if isinstance(kpis, dict) else {}, indent=2))
+        z.writestr(
+            "README.txt",
+            (
+                "Dropship Hub — Daily Ops Pack\n"
+                "Files:\n"
+                " - exceptions.csv: SKU-level issues to action\n"
+                " - supplier_followups.csv: supplier messages to send (OPEN/unresolved)\n"
+                " - order_rollup.csv: one row per order\n"
+                " - order_line_status.csv: full line-level status\n"
+                " - supplier_scorecards.csv: per-supplier performance snapshot (if available)\n"
+                " - customer_impact.csv: customer comms candidates (if available)\n"
+                " - kpis.json: dashboard KPI snapshot\n"
+            ),
+        )
+    buf.seek(0)
+    return buf.read()
+
+
+# -------------------------------
+# Access gate helpers
+# -------------------------------
+def _parse_allowed_emails_from_env() -> list[str]:
+    raw = os.getenv("DSH_ALLOWED_EMAILS", "").strip()
+    if not raw:
+        return []
+    return [e.strip().lower() for e in raw.split(",") if e.strip()]
+
+
+def get_allowed_emails() -> list[str]:
+    allowed = []
+    try:
+        allowed = st.secrets.get("ALLOWED_EMAILS", [])
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        allowed = [str(e).strip().lower() for e in allowed if str(e).strip()]
+    except Exception:
+        allowed = []
+    allowed_env = _parse_allowed_emails_from_env()
+    return sorted(set(allowed + allowed_env))
+
+
+def require_email_access_gate():
+    # 🔓 Bypass in public review mode
+    if PUBLIC_REVIEW_MODE:
+        return
+
+    st.subheader("Access")
+    email = st.text_input("Work email", key="auth_work_email").strip().lower()
+    allowed = get_allowed_emails()
+
+    if allowed:
+        if not email:
+            st.info("Enter your work email to continue.")
+            st.stop()
+        if email not in allowed:
+            st.error("This email is not authorized for early access.")
+            st.caption("Ask the admin to add your email to the allowlist.")
+            st.stop()
+        st.success("Email verified ✅")
+    else:
+        st.caption("Email verification is currently disabled (accepting all emails).")
+
+
+# ============================================================
+# Page setup
+# ============================================================
+st.set_page_config(page_title="Dropship Hub", layout="wide")
+
+ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
+
+st.title("Dropship Hub")
+st.caption("Drop ship made easy — exceptions, follow-ups, and visibility in one hub.")
+
+# 🔓 Access gate (bypassed in public review mode)
+if not PUBLIC_REVIEW_MODE:
+    code = st.text_input("Enter early access code", type="password", key="auth_access_code")
+    if code != ACCESS_CODE:
+        st.info("This app is currently in early access. Enter your code to continue.")
+        st.stop()
+
+require_email_access_gate()
+
+
+# -------------------------------
+# Paths
+# -------------------------------
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+WORKSPACES_DIR = DATA_DIR / "workspaces"
+if WORKSPACES_DIR.exists() and not WORKSPACES_DIR.is_dir():
+    st.error("Workspace storage path invalid: `data/workspaces` exists but is a FILE.")
+    st.stop()
+WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
+
+SUPPLIERS_DIR = DATA_DIR / "suppliers"
+if SUPPLIERS_DIR.exists() and not SUPPLIERS_DIR.is_dir():
+    st.error("Supplier storage path invalid: `data/suppliers` exists but is a FILE.")
+    st.stop()
+SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# -------------------------------
+# (Everything below this line stays EXACTLY as your current app.py)
+# Paste the rest of your existing file below unchanged
+# -------------------------------
+
+
+# ============================================================
 # Optional feature imports (do NOT crash if missing)
 # ============================================================
 render_sla_escalations = None
