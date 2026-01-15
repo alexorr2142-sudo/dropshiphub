@@ -50,12 +50,25 @@ def make_comms_pack_bytes(
             if "customer_message_draft" in c.columns:
                 for i, r in c.iterrows():
                     order_id = str(r.get("order_id", "")).strip()
-                    cat = str(r.get("impact_category", "customer_update")).strip()
+
+                    # ✅ Prefer impact_type, fallback to impact_category, else default
+                    cat = str(
+                        r.get("impact_type", r.get("impact_category", "customer_update"))
+                    ).strip()
+
                     msg = str(r.get("customer_message_draft", "")).strip()
+
+                    # Optional future-proof: include customer email if present
+                    cust_to = str(r.get("customer_email", "")).strip()
 
                     name_part = f"order_{order_id}" if order_id else f"row_{i}"
                     fname = f"customer_emails/customer__{_safe_filename(name_part)}__{_safe_filename(cat)}__{i}.txt"
-                    payload = f"Subject: Update on your order\n\n{msg}\n"
+
+                    header = "Subject: Update on your order\n"
+                    if cust_to:
+                        header = f"To: {cust_to}\n" + header
+
+                    payload = f"{header}\n{msg}\n"
                     z.writestr(fname, payload)
 
         z.writestr(
