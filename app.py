@@ -276,7 +276,7 @@ def get_allowed_emails() -> list[str]:
 
 def require_email_access_gate():
     st.subheader("Access")
-    email = st.text_input("Work email", key="auth_email").strip().lower()
+    email = st.text_input("Work email", key="auth_work_email").strip().lower()
     allowed = get_allowed_emails()
 
     if allowed:
