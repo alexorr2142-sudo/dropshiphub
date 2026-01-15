@@ -1,93 +1,85 @@
 # core/customer_impact.py
-from __future__ import annotations
 import pandas as pd
 
 
 def build_customer_impact_view(exceptions: pd.DataFrame, max_items: int = 50) -> pd.DataFrame:
+    """
+    Build customer comms candidates from exceptions.
+    This is intentionally defensive: it works even if your exceptions schema varies.
+    Returns columns like:
+      order_id, customer_email, customer_country, worst_urgency, reason
+    """
     if exceptions is None or exceptions.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["order_id", "customer_email", "customer_country", "worst_urgency", "reason"])
 
     df = exceptions.copy()
 
-    # IMPORTANT: cast to string to avoid pandas Categorical fillna crash
-    if "Urgency" not in df.columns:
-        df["Urgency"] = "—"
-    df["Urgency"] = df["Urgency"].astype(str)
+    # Normalize likely columns
+    order_col = "order_id" if "order_id" in df.columns else ("order" if "order" in df.columns else None)
+    if not order_col:
+        # if we can't tie to an order, we still return something
+        df["order_id"] = ""
+        order_col = "order_id"
 
-    def classify(row) -> str:
-        blob = " ".join(
-            [
-                str(row.get("issue_type", "")),
-                str(row.get("explanation", "")),
-                str(row.get("next_action", "")),
-                str(row.get("line_status", "")),
-            ]
-        ).lower()
+    email_col = "customer_email" if "customer_email" in df.columns else ("email" if "email" in df.columns else None)
+    if not email_col:
+        df["customer_email"] = ""
+        email_col = "customer_email"
 
-        if "missing tracking" in blob or "no tracking" in blob or ("tracking" in blob and "missing" in blob):
-            return "Tracking missing"
-        if "late" in blob or "overdue" in blob or "past due" in blob or "late unshipped" in blob:
-            return "Shipping delay risk"
-        if "partial" in blob or "quantity mismatch" in blob:
-            return "Partial shipment / mismatch"
-        if "address" in blob:
-            return "Address issue"
-        if "carrier exception" in blob or "returned to sender" in blob or "lost" in blob or "stuck" in blob:
-            return "Carrier exception"
-        return "Needs review"
+    country_col = "customer_country" if "customer_country" in df.columns else None
+    if not country_col:
+        df["customer_country"] = ""
+        country_col = "customer_country"
 
-    df["impact_type"] = df.apply(classify, axis=1)
+    urg_col = "Urgency" if "Urgency" in df.columns else None
+    if not urg_col:
+        df["Urgency"] = ""
+        urg_col = "Urgency"
 
-    def draft(row) -> str:
-        order_id = str(row.get("order_id", "")).strip()
-        sku = str(row.get("sku", "")).strip()
-        impact = str(row.get("impact_type", "Update")).strip()
+    # Build reason text
+    def _row_reason(r):
+        bits = []
+        for c in ["issue_type", "line_status", "explanation", "next_action"]:
+            if c in df.columns:
+                val = str(r.get(c, "") or "").strip()
+                if val:
+                    bits.append(val)
+        return " | ".join(bits)[:400]
 
-        if impact == "Tracking missing":
-            return (
-                f"Hi! Quick update on your order {order_id}. "
-                f"We’re confirming tracking details for item {sku} and will send tracking as soon as it’s available."
-            )
-        if impact == "Shipping delay risk":
-            return (
-                f"Hi! Your order {order_id} may be delayed due to supplier timing. "
-                "We’re working to confirm the updated ship date and will update you shortly."
-            )
-        if impact == "Carrier exception":
-            return (
-                f"Hi! We’re seeing a carrier issue on order {order_id}. "
-                "We’re investigating and will follow up with the next steps ASAP."
-            )
-        if impact == "Address issue":
-            return (
-                f"Hi! We need to confirm the shipping address for order {order_id}. "
-                "Please reply to confirm the best address to deliver to."
-            )
-        if impact == "Partial shipment / mismatch":
-            return (
-                f"Hi! Part of order {order_id} may ship separately. "
-                "We’ll send an update with the remaining shipment details shortly."
-            )
+    df["_reason"] = df.apply(_row_reason, axis=1)
 
-        return f"Hi! Quick update on order {order_id}. We’re checking status and will follow up soon."
+    # Worst urgency by category order
+    urg_order = {"Critical": 3, "High": 2, "Medium": 1, "Low": 0, "": -1}
+    df["_urg_rank"] = df[urg_col].astype(str).map(lambda x: urg_order.get(str(x), -1))
 
-    df["customer_message_draft"] = df.apply(draft, axis=1)
+    grp = df.groupby(df[order_col].astype(str), dropna=False)
 
-    keep = [c for c in [
-        "Urgency",
-        "order_id",
-        "sku",
-        "customer_country",
-        "supplier_name",
-        "issue_type",
-        "impact_type",
-        "customer_message_draft",
-    ] if c in df.columns]
+    rows = []
+    for oid, g in grp:
+        g = g.copy()
+        g = g.sort_values("_urg_rank", ascending=False)
 
-    out = df[keep].copy()
+        worst = str(g.iloc[0][urg_col] or "").strip()
+        email = str(g.iloc[0][email_col] or "").strip()
+        country = str(g.iloc[0][country_col] or "").strip()
 
-    urgency_rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-    out["_u"] = out["Urgency"].astype(str).map(urgency_rank).fillna(9)
-    out = out.sort_values(["_u"], ascending=True).drop(columns=["_u"], errors="ignore")
+        # Compose a concise reason summary from top 3 lines
+        reasons = [str(x).strip() for x in g["_reason"].head(3).tolist() if str(x).strip()]
+        reason = " / ".join(reasons)[:500]
+
+        rows.append(
+            {
+                "order_id": str(oid).strip(),
+                "customer_email": email,
+                "customer_country": country,
+                "worst_urgency": worst,
+                "reason": reason,
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    # Sort: worst urgency first
+    out["_urg_rank"] = out["worst_urgency"].astype(str).map(lambda x: urg_order.get(str(x), -1))
+    out = out.sort_values("_urg_rank", ascending=False).drop(columns=["_urg_rank"], errors="ignore")
 
     return out.head(int(max_items)).reset_index(drop=True)
