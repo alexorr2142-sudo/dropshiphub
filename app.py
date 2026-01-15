@@ -4,13 +4,13 @@ import json
 import io
 import zipfile
 import shutil
-import hashlib
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
 
 # ============================================================
 # Optional feature imports (do NOT crash if missing)
@@ -32,8 +32,7 @@ render_kpi_trends = None
 build_supplier_accountability_view = None
 render_supplier_accountability = None
 
-render_issue_tracker_ui = None
-
+# --- Optional UI/core modules ---
 try:
     from ui.sla_escalations_ui import render_sla_escalations  # type: ignore
 except Exception:
@@ -43,11 +42,6 @@ try:
     from core.issue_tracker import IssueTrackerStore  # type: ignore
 except Exception:
     IssueTrackerStore = None
-
-try:
-    from ui.issue_tracker_ui import render_issue_tracker_ui  # type: ignore
-except Exception:
-    render_issue_tracker_ui = None
 
 try:
     from core.customer_impact import build_customer_impact_view  # type: ignore
@@ -94,6 +88,7 @@ try:
 except Exception:
     render_supplier_accountability = None
 
+
 # --- Local modules (your repo files) ---
 try:
     from normalize import normalize_orders, normalize_shipments, normalize_tracking
@@ -136,13 +131,41 @@ def copy_button(text: str, label: str, key: str):
             b.innerText = 'Copied ✅';
             setTimeout(() => b.innerText = old, 1200);
           }})
-          .catch(() => alert('Copy failed. Your browser may block clipboard access.'));"
-      >
+          .catch(() => alert('Copy failed. Your browser may block clipboard access.'));">
         {label}
       </button>
     </div>
     """
     components.html(html, height=55)
+
+
+# -------------------------------
+# Ensure issue_id exists (Issue Tracker requires it)
+# -------------------------------
+def ensure_issue_id(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Issue Tracker requires issue_id. If missing, generate a stable ID from common fields.
+    """
+    if df is None or df.empty:
+        return df
+    if "issue_id" in df.columns and df["issue_id"].astype(str).str.strip().ne("").any():
+        return df
+
+    out = df.copy()
+
+    parts = []
+    for c in ["supplier_name", "order_id", "sku", "issue_type", "line_status"]:
+        if c in out.columns:
+            parts.append(out[c].fillna("").astype(str).str.strip())
+        else:
+            parts.append(pd.Series([""] * len(out)))
+
+    joined = parts[0]
+    for p in parts[1:]:
+        joined = joined + "|" + p
+
+    out["issue_id"] = joined.apply(lambda x: str(x).strip() if str(x).strip() else "issue")
+    return out
 
 
 # -------------------------------
@@ -243,7 +266,7 @@ def make_daily_ops_pack_bytes(
                 "Dropship Hub — Daily Ops Pack\n"
                 "Files:\n"
                 " - exceptions.csv: SKU-level issues to action\n"
-                " - supplier_followups.csv: supplier messages to send (OPEN)\n"
+                " - supplier_followups.csv: supplier messages to send\n"
                 " - order_rollup.csv: one row per order\n"
                 " - order_line_status.csv: full line-level status\n"
                 " - supplier_scorecards.csv: per-supplier performance snapshot (if available)\n"
@@ -256,7 +279,7 @@ def make_daily_ops_pack_bytes(
 
 
 # -------------------------------
-# Access gate (email allowlist)
+# Basic auth helpers
 # -------------------------------
 def _parse_allowed_emails_from_env() -> list[str]:
     raw = os.getenv("DSH_ALLOWED_EMAILS", "").strip()
@@ -297,7 +320,7 @@ def require_email_access_gate():
 
 
 # -------------------------------
-# Workspaces helpers (Save/Load/History/Delete)
+# Workspaces (Save/Load/History/Delete)
 # -------------------------------
 def _safe_slug(s: str) -> str:
     s = (s or "").strip()
@@ -324,6 +347,7 @@ def list_runs(ws_root: Path) -> list[dict]:
         for run_dir in workspace_dir.iterdir():
             if not run_dir.is_dir():
                 continue
+
             meta_path = run_dir / "meta.json"
             meta = {}
             if meta_path.exists():
@@ -331,6 +355,7 @@ def list_runs(ws_root: Path) -> list[dict]:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 except Exception:
                     meta = {}
+
             created_at = meta.get("created_at", run_dir.name)
             runs.append(
                 {
@@ -385,7 +410,7 @@ def save_run(
         "account_id": account_id,
         "store_id": store_id,
         "platform_hint": platform_hint,
-        "kpis": kpis if isinstance(kpis, dict) else {},
+        "kpis": kpis,
         "row_counts": {
             "orders": int(len(orders)),
             "shipments": int(len(shipments)),
@@ -403,6 +428,7 @@ def save_run(
 
 def load_run(run_dir: Path) -> dict:
     out = {"meta": {}}
+
     meta_path = run_dir / "meta.json"
     if meta_path.exists():
         try:
@@ -465,7 +491,7 @@ def build_run_history_df(runs: list[dict]) -> pd.DataFrame:
 
 
 # -------------------------------
-# Supplier CRM (persist under data/suppliers/{tenant})
+# Supplier CRM
 # -------------------------------
 def normalize_supplier_key(s: str) -> str:
     return (str(s) if s is not None else "").strip().lower()
@@ -526,11 +552,14 @@ def enrich_followups_with_suppliers(followups: pd.DataFrame, suppliers_df: pd.Da
 
     merged = f.merge(s2, on="_supplier_key", how="left", suffixes=("", "_crm"))
 
-    merged["supplier_email"] = merged.get("supplier_email", "").fillna("").astype(str)
-    merged["supplier_email"] = merged["supplier_email"].where(
-        merged["supplier_email"].str.strip() != "",
-        merged.get("supplier_email_crm", "").fillna("").astype(str),
-    )
+    if "supplier_email" in f.columns:
+        merged["supplier_email"] = merged["supplier_email"].fillna("")
+        merged["supplier_email"] = merged["supplier_email"].where(
+            merged["supplier_email"].astype(str).str.strip() != "",
+            merged.get("supplier_email_crm", "").fillna(""),
+        )
+    else:
+        merged["supplier_email"] = merged.get("supplier_email_crm", "").fillna("")
 
     for c in ["supplier_channel", "language", "timezone"]:
         if c not in merged.columns and f"{c}_crm" in merged.columns:
@@ -550,8 +579,15 @@ def add_missing_supplier_contact_exceptions(exceptions: pd.DataFrame, followups:
     if "supplier_name" not in f.columns:
         return exceptions
 
+    needs = pd.Series([True] * len(f))
+    if "item_count" in f.columns:
+        try:
+            needs = f["item_count"].fillna(0).astype(float) > 0
+        except Exception:
+            needs = pd.Series([True] * len(f))
+
     email = f.get("supplier_email", pd.Series([""] * len(f))).fillna("").astype(str).str.strip()
-    missing = email == ""
+    missing = needs & (email == "")
     if missing.sum() == 0:
         return exceptions
 
@@ -574,52 +610,142 @@ def add_missing_supplier_contact_exceptions(exceptions: pd.DataFrame, followups:
             }
         )
     add_df = pd.DataFrame(rows)
+
     if exceptions is None or exceptions.empty:
         return add_df
+
     return pd.concat([exceptions, add_df], ignore_index=True, sort=False)
 
 
 # -------------------------------
-# Issue Tracker: ensure issue_id exists
+# Supplier Scorecards
 # -------------------------------
-def ensure_issue_id(followups_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Issue Tracker requires issue_id in followups_full.
-    If missing, generate a stable sha1 ID from best-available columns.
-    """
-    if followups_df is None or followups_df.empty:
-        return followups_df
+def _contains_any(s: str, terms: list[str]) -> bool:
+    s = (s or "").lower()
+    return any(t in s for t in terms)
 
-    if "issue_id" in followups_df.columns and followups_df["issue_id"].astype(str).str.strip().ne("").any():
-        out = followups_df.copy()
-        out["issue_id"] = out["issue_id"].astype(str)
-        return out
 
-    f = followups_df.copy()
-    candidates = [
-        "supplier_name",
-        "supplier_email",
-        "order_ids",
-        "order_id",
-        "supplier_order_id",
-        "po_number",
-        "sku",
-        "issue_type",
-        "reason",
-        "urgency",
-        "worst_escalation",
-    ]
-    use_cols = [c for c in candidates if c in f.columns]
-    if not use_cols:
-        f["issue_id"] = f.index.astype(str).map(lambda x: f"row_{x}")
-        return f
+def build_supplier_scorecard_from_run(line_status_df: pd.DataFrame, exceptions_df: pd.DataFrame) -> pd.DataFrame:
+    if line_status_df is None or line_status_df.empty:
+        return pd.DataFrame()
 
-    def _make_id(row) -> str:
-        blob = "||".join([str(row.get(c, "")).strip().lower() for c in use_cols])
-        return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+    df = line_status_df.copy()
+    if "supplier_name" not in df.columns:
+        return pd.DataFrame()
 
-    f["issue_id"] = f.apply(_make_id, axis=1)
-    return f
+    df["supplier_name"] = df["supplier_name"].fillna("").astype(str)
+    df = df[df["supplier_name"].str.strip() != ""].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    base = df.groupby("supplier_name").size().reset_index(name="total_lines")
+
+    exc = None
+    if exceptions_df is not None and not exceptions_df.empty and "supplier_name" in exceptions_df.columns:
+        exc = exceptions_df.copy()
+        exc["supplier_name"] = exc["supplier_name"].fillna("").astype(str)
+        exc = exc[exc["supplier_name"].str.strip() != ""].copy()
+        if not exc.empty:
+            if "Urgency" not in exc.columns:
+                exc = add_urgency_column(exc)
+
+            exc_counts = exc.groupby("supplier_name").size().reset_index(name="exception_lines")
+            crit = exc[exc["Urgency"] == "Critical"].groupby("supplier_name").size().reset_index(name="critical")
+            high = exc[exc["Urgency"] == "High"].groupby("supplier_name").size().reset_index(name="high")
+        else:
+            exc_counts = pd.DataFrame(columns=["supplier_name", "exception_lines"])
+            crit = pd.DataFrame(columns=["supplier_name", "critical"])
+            high = pd.DataFrame(columns=["supplier_name", "high"])
+    else:
+        exc_counts = pd.DataFrame(columns=["supplier_name", "exception_lines"])
+        crit = pd.DataFrame(columns=["supplier_name", "critical"])
+        high = pd.DataFrame(columns=["supplier_name", "high"])
+
+    out = base.merge(exc_counts, on="supplier_name", how="left").merge(crit, on="supplier_name", how="left").merge(high, on="supplier_name", how="left")
+    out["exception_lines"] = out["exception_lines"].fillna(0).astype(int)
+    out["critical"] = out["critical"].fillna(0).astype(int)
+    out["high"] = out["high"].fillna(0).astype(int)
+    out["exception_rate"] = (out["exception_lines"] / out["total_lines"]).round(4)
+
+    if exc is not None and not exc.empty:
+        def _flag_count(term_list):
+            tmp = exc.copy()
+            blob = (
+                tmp.get("issue_type", "").astype(str).fillna("") + " " +
+                tmp.get("explanation", "").astype(str).fillna("") + " " +
+                tmp.get("next_action", "").astype(str).fillna("")
+            ).str.lower()
+            tmp["_flag"] = blob.apply(lambda x: _contains_any(x, term_list))
+            return tmp[tmp["_flag"]].groupby("supplier_name").size().reset_index(name="count")
+
+        missing_tracking_terms = ["missing tracking", "no tracking", "tracking missing", "invalid tracking"]
+        late_terms = ["late", "overdue", "past due", "late unshipped"]
+        carrier_terms = ["carrier exception", "exception", "stuck", "lost", "returned to sender"]
+
+        mt = _flag_count(missing_tracking_terms).rename(columns={"count": "missing_tracking_flags"})
+        lt = _flag_count(late_terms).rename(columns={"count": "late_flags"})
+        ct = _flag_count(carrier_terms).rename(columns={"count": "carrier_exception_flags"})
+
+        out = out.merge(mt, on="supplier_name", how="left").merge(lt, on="supplier_name", how="left").merge(ct, on="supplier_name", how="left")
+        for c in ["missing_tracking_flags", "late_flags", "carrier_exception_flags"]:
+            out[c] = out.get(c, 0).fillna(0).astype(int)
+    else:
+        out["missing_tracking_flags"] = 0
+        out["late_flags"] = 0
+        out["carrier_exception_flags"] = 0
+
+    out = out.sort_values(["exception_rate", "critical", "high"], ascending=[False, False, False])
+    return out
+
+
+def _parse_run_id_to_dt(run_id: str):
+    try:
+        return datetime.strptime(run_id, "%Y%m%dT%H%M%SZ")
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def load_recent_scorecard_history(ws_root_str: str, max_runs: int = 25) -> pd.DataFrame:
+    ws_root = Path(ws_root_str)
+    runs = list_runs(ws_root)
+    runs = runs[:max_runs]
+
+    all_rows = []
+    for r in runs:
+        run_dir = Path(r["path"])
+        run_id = r.get("run_id", run_dir.name)
+        run_dt = _parse_run_id_to_dt(run_id)
+
+        line_path = run_dir / "line_status.csv"
+        exc_path = run_dir / "exceptions.csv"
+        if not line_path.exists():
+            continue
+
+        try:
+            line_df = pd.read_csv(line_path)
+        except Exception:
+            continue
+
+        try:
+            exc_df = pd.read_csv(exc_path) if exc_path.exists() else pd.DataFrame()
+        except Exception:
+            exc_df = pd.DataFrame()
+
+        sc = build_supplier_scorecard_from_run(line_df, exc_df)
+        if sc is None or sc.empty:
+            continue
+
+        sc = sc.copy()
+        sc["run_id"] = run_id
+        sc["run_dt"] = run_dt
+        all_rows.append(sc)
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    hist = pd.concat(all_rows, ignore_index=True, sort=False)
+    return hist
 
 
 # -------------------------------
@@ -647,11 +773,15 @@ def _reset_demo_tables(data_dir: Path):
     st.session_state["demo_raw_tracking"] = pd.read_csv(data_dir / "raw_tracking.csv")
 
 
-# ============================================================
-# PAGE SETUP
-# ============================================================
+# -------------------------------
+# Page setup
+# -------------------------------
 st.set_page_config(page_title="Dropship Hub", layout="wide")
 
+
+# -------------------------------
+# Early Access Gate
+# -------------------------------
 ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
 
 st.title("Dropship Hub — Early Access")
@@ -664,6 +794,10 @@ if code != ACCESS_CODE:
 
 require_email_access_gate()
 
+
+# -------------------------------
+# Paths
+# -------------------------------
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -687,9 +821,9 @@ if SUPPLIERS_DIR.exists() and not SUPPLIERS_DIR.is_dir():
 SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ============================================================
-# SIDEBAR
-# ============================================================
+# -------------------------------
+# Sidebar: plan + tenant + defaults + Supplier CRM + Sticky Demo + Issue Tracker Maintenance
+# -------------------------------
 with st.sidebar:
     st.header("Plan")
     _plan = st.selectbox("Current plan", ["Early Access (Free)", "Pro", "Team"], index=0)
@@ -731,30 +865,37 @@ with st.sidebar:
 
     st.divider()
     st.header("Demo Mode (Sticky)")
-    st.toggle(
+    demo_mode = st.toggle(
         "Use demo data (sticky)",
         key="demo_mode",
         help="Keeps demo data and your edits across interactions until you reset or turn off demo mode.",
     )
+
     _init_demo_tables_if_needed(DATA_DIR)
 
-    if st.session_state.get("demo_mode", False):
+    if demo_mode:
         cdm1, cdm2 = st.columns(2)
         with cdm1:
             if st.button("Reset demo", use_container_width=True):
-                _reset_demo_tables(DATA_DIR)
-                st.success("Demo reset ✅")
-                st.rerun()
+                try:
+                    _reset_demo_tables(DATA_DIR)
+                    st.success("Demo reset ✅")
+                    st.rerun()
+                except Exception as e:
+                    st.error("Couldn't reset demo data.")
+                    st.code(str(e))
         with cdm2:
             if st.button("Clear demo", use_container_width=True):
                 st.session_state["demo_mode"] = False
                 _init_demo_tables_if_needed(DATA_DIR)
                 st.rerun()
 
+    # ✅ Issue Tracker maintenance (Prune / Clear)
     if IssueTrackerStore is not None:
         st.divider()
         with st.expander("Issue Tracker Maintenance", expanded=False):
             st.caption("Keep your resolved history useful without growing forever.")
+
             prune_days = st.number_input(
                 "Prune resolved older than (days)",
                 min_value=1,
@@ -763,6 +904,7 @@ with st.sidebar:
                 step=1,
                 key="issue_tracker_prune_days",
             )
+
             cmt1, cmt2 = st.columns(2)
             with cmt1:
                 if st.button("🧹 Prune old resolved", use_container_width=True, key="btn_prune_resolved"):
@@ -770,6 +912,7 @@ with st.sidebar:
                     removed = store.prune_resolved_older_than_days(int(prune_days))
                     st.success(f"Pruned {removed} resolved item(s).")
                     st.rerun()
+
             with cmt2:
                 if st.button("🗑️ Clear ALL resolved", use_container_width=True, key="btn_clear_resolved"):
                     store = IssueTrackerStore()
@@ -800,21 +943,23 @@ with st.sidebar:
             st.caption("No supplier directory loaded yet. Upload suppliers.csv to auto-fill follow-up emails.")
         else:
             show_cols = [c for c in ["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"] if c in suppliers_df_preview.columns]
-            st.dataframe(
-                style_supplier_table(suppliers_df_preview[show_cols]) if show_cols else suppliers_df_preview,
-                use_container_width=True,
-                height=220,
-            )
+            if not show_cols:
+                st.dataframe(suppliers_df_preview, use_container_width=True, height=220)
+            else:
+                st.dataframe(style_supplier_table(suppliers_df_preview[show_cols]), use_container_width=True, height=220)
+
             if "supplier_email" in suppliers_df_preview.columns:
                 missing_emails = suppliers_df_preview["supplier_email"].fillna("").astype(str).str.strip().eq("").sum()
                 st.caption(f"Missing supplier_email: {int(missing_emails)} row(s) (highlighted)")
 
+    st.caption("Tip: Upload suppliers.csv once per account/store to auto-fill follow-up emails.")
+
 suppliers_df = st.session_state.get("suppliers_df", pd.DataFrame())
 
 
-# ============================================================
-# ONBOARDING CHECKLIST (14)
-# ============================================================
+# -------------------------------
+# Onboarding checklist (14 steps)
+# -------------------------------
 st.divider()
 with st.expander("Onboarding checklist (14 steps)", expanded=True):
     st.markdown(
@@ -832,20 +977,22 @@ with st.expander("Onboarding checklist (14 steps)", expanded=True):
 11. Upload **suppliers.csv** to enable auto-filled supplier emails  
 12. Review **Ops Triage** (Critical + High first)  
 13. Work **Exceptions Queue** (filter by supplier/country/urgency)  
-14. Use **Ops Outreach (Supplier + Customer Comms)**, then **Save Run** to build trends/history
+14. Use **SLA Escalations + Supplier Follow-ups + Customer Emails**, then **Save Run** to build trends/history
         """.strip()
     )
 
 
-# ============================================================
-# START HERE + DEMO EDITOR
-# ============================================================
+# -------------------------------
+# Start Here
+# -------------------------------
 st.subheader("Start here")
 
 if st.session_state.get("demo_mode", False):
     st.success("Demo mode is ON (sticky). Your demo edits persist until you reset/clear.")
+
     with st.expander("Edit demo data (these edits persist)", expanded=True):
         e1, e2, e3 = st.columns(3)
+
         with e1:
             st.caption("raw_orders.csv (demo)")
             st.session_state["demo_raw_orders"] = st.data_editor(
@@ -855,6 +1002,7 @@ if st.session_state.get("demo_mode", False):
                 num_rows="dynamic",
                 key="demo_orders_editor",
             )
+
         with e2:
             st.caption("raw_shipments.csv (demo)")
             st.session_state["demo_raw_shipments"] = st.data_editor(
@@ -864,6 +1012,7 @@ if st.session_state.get("demo_mode", False):
                 num_rows="dynamic",
                 key="demo_shipments_editor",
             )
+
         with e3:
             st.caption("raw_tracking.csv (demo)")
             st.session_state["demo_raw_tracking"] = st.data_editor(
@@ -877,9 +1026,9 @@ else:
     st.info("Turn on **Demo Mode (Sticky)** in the sidebar to play with demo data (edits persist).")
 
 
-# ============================================================
-# UPLOADS + TEMPLATES
-# ============================================================
+# -------------------------------
+# Upload section
+# -------------------------------
 st.divider()
 st.subheader("Upload your data")
 
@@ -891,6 +1040,10 @@ with col2:
 with col3:
     f_tracking = st.file_uploader("Tracking CSV (optional)", type=["csv"])
 
+
+# -------------------------------
+# Template downloads
+# -------------------------------
 st.subheader("Download templates")
 
 shipments_template = pd.DataFrame(
@@ -907,6 +1060,7 @@ shipments_template = pd.DataFrame(
         "To Country",
     ]
 )
+
 tracking_template = pd.DataFrame(
     columns=[
         "Carrier",
@@ -919,23 +1073,38 @@ tracking_template = pd.DataFrame(
         "Exception",
     ]
 )
-suppliers_template = pd.DataFrame(columns=["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"])
+
+suppliers_template = pd.DataFrame(
+    columns=["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"]
+)
 
 t1, t2, t3 = st.columns(3)
 with t1:
-    st.download_button("Shipments template CSV", data=shipments_template.to_csv(index=False).encode("utf-8"),
-                       file_name="shipments_template.csv", mime="text/csv")
+    st.download_button(
+        "Shipments template CSV",
+        data=shipments_template.to_csv(index=False).encode("utf-8"),
+        file_name="shipments_template.csv",
+        mime="text/csv",
+    )
 with t2:
-    st.download_button("Tracking template CSV", data=tracking_template.to_csv(index=False).encode("utf-8"),
-                       file_name="tracking_template.csv", mime="text/csv")
+    st.download_button(
+        "Tracking template CSV",
+        data=tracking_template.to_csv(index=False).encode("utf-8"),
+        file_name="tracking_template.csv",
+        mime="text/csv",
+    )
 with t3:
-    st.download_button("Suppliers template CSV", data=suppliers_template.to_csv(index=False).encode("utf-8"),
-                       file_name="suppliers_template.csv", mime="text/csv")
+    st.download_button(
+        "Suppliers template CSV",
+        data=suppliers_template.to_csv(index=False).encode("utf-8"),
+        file_name="suppliers_template.csv",
+        mime="text/csv",
+    )
 
 
-# ============================================================
-# PIPELINE: demo OR uploads
-# ============================================================
+# -------------------------------
+# Run pipeline: demo OR uploads
+# -------------------------------
 raw_orders = None
 raw_shipments = None
 raw_tracking = None
@@ -971,9 +1140,9 @@ else:
         st.stop()
 
 
-# ============================================================
-# NORMALIZE
-# ============================================================
+# -------------------------------
+# Normalize
+# -------------------------------
 st.divider()
 st.subheader("Data checks")
 
@@ -1001,9 +1170,9 @@ else:
     st.success("Looks good ✅")
 
 
-# ============================================================
-# RECONCILE
-# ============================================================
+# -------------------------------
+# Reconcile
+# -------------------------------
 st.divider()
 st.subheader("Running reconciliation")
 
@@ -1019,28 +1188,17 @@ try:
 except Exception:
     pass
 
-# CRM enrich + missing supplier contact exceptions
+# Enrich followups with CRM + add "missing supplier contact" exceptions
 followups = enrich_followups_with_suppliers(followups, suppliers_df)
 exceptions = add_missing_supplier_contact_exceptions(exceptions, followups)
 
-# Urgency once
-if exceptions is not None and not exceptions.empty and "Urgency" not in exceptions.columns:
-    exceptions = add_urgency_column(exceptions)
 
-# Customer impact candidates (used later in Ops Outreach)
-customer_impact = pd.DataFrame()
-if build_customer_impact_view is not None:
-    try:
-        customer_impact = build_customer_impact_view(exceptions=exceptions, max_items=50)
-    except Exception:
-        customer_impact = pd.DataFrame()
-
-
-# ============================================================
-# SLA Escalations + Issue Tracker (FULL vs OPEN)
-# ============================================================
+# -------------------------------
+# SLA Escalations + Issue Tracker (Resolved + Notes)
+# IMPORTANT: preserve columns; OPEN is filtered from FULL
+# -------------------------------
 followups_full = followups.copy() if isinstance(followups, pd.DataFrame) else pd.DataFrame()
-followups_full = ensure_issue_id(followups_full)  # <-- critical for Issue Tracker
+followups_full = ensure_issue_id(followups_full)
 followups_open = followups_full.copy()
 
 escalations_df = pd.DataFrame()
@@ -1057,7 +1215,7 @@ if render_sla_escalations is not None:
     except TypeError:
         pass
 
-# OPEN from FULL using Issue Tracker store flags
+# Always compute OPEN from FULL using the issue tracker store
 if IssueTrackerStore is not None and not followups_full.empty and "issue_id" in followups_full.columns:
     store = IssueTrackerStore()
     issue_map = store.load()
@@ -1071,12 +1229,13 @@ if IssueTrackerStore is not None and not followups_full.empty and "issue_id" in 
 else:
     followups_open = followups_full.copy()
 
-followups = followups_open  # operational use
+# Operational lists should use OPEN
+followups = followups_open
 
 
-# ============================================================
-# WORKSPACES (Save/Load/History/Delete)
-# ============================================================
+# -------------------------------
+# Workspaces UI (Save/Load/History/Delete)
+# -------------------------------
 ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
 ws_root.mkdir(parents=True, exist_ok=True)
 
@@ -1086,6 +1245,7 @@ if "loaded_run" not in st.session_state:
 with st.sidebar:
     st.divider()
     st.header("Workspaces")
+
     workspace_name = st.text_input("Workspace name", value="default", key="ws_name")
 
     if st.button("💾 Save this run", key="btn_save_run"):
@@ -1168,11 +1328,12 @@ with st.sidebar:
     else:
         st.caption("No saved runs yet. Click **Save this run** to create your first run history entry.")
 
-# If a run is loaded, override outputs (+ suppliers snapshot if present)
+# If a run is loaded, override outputs
 if st.session_state.get("loaded_run"):
     loaded = load_run(Path(st.session_state["loaded_run"]))
     exceptions = loaded.get("exceptions", exceptions)
-    followups_full = ensure_issue_id(loaded.get("followups", followups_full))
+    followups_full = loaded.get("followups", followups_full)
+    followups_full = ensure_issue_id(followups_full)
     order_rollup = loaded.get("order_rollup", order_rollup)
     line_status_df = loaded.get("line_status_df", line_status_df)
 
@@ -1201,20 +1362,39 @@ if st.session_state.get("loaded_run"):
     st.info(f"Viewing saved run: **{meta.get('workspace_name','')} / {meta.get('created_at','')}**")
 
 
-# ============================================================
-# OPS PACK ZIP
-# ============================================================
+# -------------------------------
+# Urgency ONCE for whole page
+# -------------------------------
+if exceptions is not None and not exceptions.empty and "Urgency" not in exceptions.columns:
+    exceptions = add_urgency_column(exceptions)
+
+# Scorecard once
+scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
+
+
+# -------------------------------
+# Customer Impact (for customer comms)
+# -------------------------------
+customer_impact = pd.DataFrame()
+if build_customer_impact_view is not None:
+    try:
+        customer_impact = build_customer_impact_view(exceptions=exceptions, max_items=50)
+    except Exception:
+        customer_impact = pd.DataFrame()
+
+
+# -------------------------------
+# Daily Ops Pack ZIP
+# -------------------------------
 pack_date = datetime.now().strftime("%Y%m%d")
 pack_name = f"daily_ops_pack_{pack_date}.zip"
-
-# (Supplier scorecards/history can stay in modules; pack still includes what exists)
 ops_pack_bytes = make_daily_ops_pack_bytes(
     exceptions=exceptions if exceptions is not None else pd.DataFrame(),
     followups=followups_open if followups_open is not None else (followups if followups is not None else pd.DataFrame()),
     order_rollup=order_rollup if order_rollup is not None else pd.DataFrame(),
     line_status_df=line_status_df if line_status_df is not None else pd.DataFrame(),
     kpis=kpis if isinstance(kpis, dict) else {},
-    supplier_scorecards=None,
+    supplier_scorecards=scorecard,
     customer_impact=customer_impact,
 )
 
@@ -1229,11 +1409,12 @@ with st.sidebar:
         use_container_width=True,
         key="btn_daily_ops_pack_sidebar",
     )
+    st.caption("Exports: exceptions, open followups, rollup, line status, KPIs, scorecards, customer impact.")
 
 
-# ============================================================
-# DASHBOARD
-# ============================================================
+# -------------------------------
+# Dashboard KPIs
+# -------------------------------
 st.divider()
 st.subheader("Dashboard")
 
@@ -1244,23 +1425,10 @@ k3.metric("% Delivered", f"{(kpis or {}).get('pct_delivered', 0)}%")
 k4.metric("% Unshipped", f"{(kpis or {}).get('pct_unshipped', 0)}%")
 k5.metric("% Late Unshipped", f"{(kpis or {}).get('pct_late_unshipped', 0)}%")
 
-if build_daily_action_list is not None and render_daily_action_list is not None:
-    try:
-        actions = build_daily_action_list(exceptions=exceptions, followups=followups_open, max_items=10)
-        render_daily_action_list(actions)
-    except Exception:
-        pass
 
-if render_kpi_trends is not None:
-    try:
-        render_kpi_trends(workspaces_dir=WORKSPACES_DIR, account_id=account_id, store_id=store_id)
-    except Exception:
-        pass
-
-
-# ============================================================
-# OPS TRIAGE
-# ============================================================
+# -------------------------------
+# Ops Triage
+# -------------------------------
 st.divider()
 st.subheader("Ops Triage (Start here)")
 
@@ -1274,226 +1442,51 @@ else:
     cC.metric("Medium", int(counts.get("Medium", 0)))
     cD.metric("Low", int(counts.get("Low", 0)))
 
-    if "triage_filter" not in st.session_state:
-        st.session_state["triage_filter"] = "All"
 
-    def set_triage(val: str):
-        st.session_state["triage_filter"] = val
-
-    f1, f2, f3, f4 = st.columns(4)
-    with f1:
-        st.button("All", on_click=set_triage, args=("All",), use_container_width=True)
-    with f2:
-        st.button("Critical + High", on_click=set_triage, args=("CriticalHigh",), use_container_width=True)
-    with f3:
-        st.button("Missing tracking", on_click=set_triage, args=("MissingTracking",), use_container_width=True)
-    with f4:
-        st.button("Late unshipped", on_click=set_triage, args=("LateUnshipped",), use_container_width=True)
-
-    triage = exceptions.copy()
-    mode = st.session_state["triage_filter"]
-
-    if mode == "CriticalHigh" and "Urgency" in triage.columns:
-        triage = triage[triage["Urgency"].isin(["Critical", "High"])]
-
-    if mode == "MissingTracking":
-        blob = (
-            triage.get("issue_type", "").astype(str).fillna("") + " " +
-            triage.get("explanation", "").astype(str).fillna("") + " " +
-            triage.get("next_action", "").astype(str).fillna("")
-        ).str.lower()
-        triage = triage[blob.str.contains("missing tracking|no tracking|tracking missing|invalid tracking", regex=True, na=False)]
-
-    if mode == "LateUnshipped":
-        blob = (
-            triage.get("issue_type", "").astype(str).fillna("") + " " +
-            triage.get("explanation", "").astype(str).fillna("") + " " +
-            triage.get("line_status", "").astype(str).fillna("")
-        ).str.lower()
-        triage = triage[blob.str.contains("late unshipped|overdue|past due|late", regex=True, na=False)]
-
-    preferred_cols = [
-        "Urgency", "order_id", "sku", "issue_type", "customer_country",
-        "supplier_name", "quantity_ordered", "quantity_shipped",
-        "line_status", "explanation", "next_action", "customer_risk",
-    ]
-    show_cols = [c for c in preferred_cols if c in triage.columns]
-    sort_cols = [c for c in ["Urgency", "order_id"] if c in triage.columns]
-    if sort_cols:
-        triage = triage.sort_values(sort_cols, ascending=True)
-
-    st.markdown("### Top issues to action now")
-    st.dataframe(style_exceptions_table(triage[show_cols].head(10)), use_container_width=True, height=320)
-
-    st.download_button("⬇️ Download Daily Ops Pack ZIP", data=ops_pack_bytes, file_name=pack_name,
-                       mime="application/zip", key="btn_daily_ops_pack_main")
-
-
-# ============================================================
-# EXCEPTIONS QUEUE
-# ============================================================
+# -------------------------------
+# Supplier Scorecards
+# -------------------------------
 st.divider()
-st.subheader("Exceptions Queue (Action this first)")
+st.subheader("Supplier Scorecards (Performance + Trends)")
 
-if exceptions is None or exceptions.empty:
-    st.info("No exceptions found 🎉")
+if scorecard is None or scorecard.empty:
+    st.info("Scorecards require `supplier_name` in your normalized line status data.")
 else:
-    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+    top_n = st.slider("Show top N suppliers", min_value=5, max_value=50, value=15, step=5)
+    view = scorecard.head(int(top_n))
 
-    with fcol1:
-        issue_types = sorted(exceptions["issue_type"].dropna().unique().tolist()) if "issue_type" in exceptions.columns else []
-        issue_filter = st.multiselect("Issue types", issue_types, default=issue_types)
+    show_cols = [
+        "supplier_name",
+        "total_lines",
+        "exception_lines",
+        "exception_rate",
+        "critical",
+        "high",
+        "missing_tracking_flags",
+        "late_flags",
+        "carrier_exception_flags",
+    ]
+    show_cols = [c for c in show_cols if c in view.columns]
+    st.dataframe(view[show_cols], use_container_width=True, height=320)
 
-    with fcol2:
-        countries = sorted([c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist() if str(c).strip() != ""])
-        country_filter = st.multiselect("Customer country", countries, default=countries)
 
-    with fcol3:
-        suppliers = sorted([s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist() if str(s).strip() != ""])
-        supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers)
-
-    with fcol4:
-        urgencies = ["Critical", "High", "Medium", "Low"]
-        urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies)
-
-    filtered = exceptions.copy()
-    if issue_filter and "issue_type" in filtered.columns:
-        filtered = filtered[filtered["issue_type"].isin(issue_filter)]
-    if country_filter and "customer_country" in filtered.columns:
-        filtered = filtered[filtered["customer_country"].isin(country_filter)]
-    if supplier_filter and "supplier_name" in filtered.columns:
-        filtered = filtered[filtered["supplier_name"].isin(supplier_filter)]
-    if urgency_filter and "Urgency" in filtered.columns:
-        filtered = filtered[filtered["Urgency"].isin(urgency_filter)]
-
-    show_cols = [c for c in [
-        "Urgency", "order_id", "sku", "issue_type", "customer_country",
-        "supplier_name", "quantity_ordered", "quantity_shipped",
-        "line_status", "explanation", "next_action", "customer_risk",
-    ] if c in filtered.columns]
-
-    if "Urgency" in filtered.columns:
-        filtered = filtered.sort_values(["Urgency", "order_id"], ascending=True, errors="ignore")
-
-    st.dataframe(style_exceptions_table(filtered[show_cols]), use_container_width=True, height=420)
-    st.download_button("Download Exceptions CSV", data=filtered.to_csv(index=False).encode("utf-8"),
-                       file_name="exceptions_queue.csv", mime="text/csv")
+# -------------------------------
+# SLA Escalations panel
+# -------------------------------
+if isinstance(escalations_df, pd.DataFrame) and not escalations_df.empty:
+    st.divider()
+    st.subheader("SLA Escalations (Supplier-level)")
+    st.dataframe(escalations_df, use_container_width=True, height=260)
 
 
 # ============================================================
-# OPS OUTREACH (COMMS GROUPED): Supplier + Customer + Pack
+# Ops Outreach (Grouped Comms)
 # ============================================================
 st.divider()
 st.subheader("Ops Outreach (Comms)")
 
-tab_sup, tab_cust, tab_pack = st.tabs(["Supplier emails", "Customer emails", "Comms pack"])
-
-# -------------------------------
-# Supplier emails (followups + generator)
-# -------------------------------
-with tab_sup:
-    followups_for_ops = followups_open if isinstance(followups_open, pd.DataFrame) else followups
-
-    if followups_for_ops is None or followups_for_ops.empty:
-        st.info("No supplier follow-ups needed.")
-    else:
-        summary_cols = [c for c in ["supplier_name", "supplier_email", "worst_escalation", "urgency", "item_count", "order_ids"] if c in followups_for_ops.columns]
-        st.dataframe(followups_for_ops[summary_cols] if summary_cols else followups_for_ops, use_container_width=True, height=240)
-
-        cdl1, cdl2 = st.columns(2)
-        with cdl1:
-            st.download_button("Download OPEN Follow-ups CSV (Unresolved)",
-                               data=followups_for_ops.to_csv(index=False).encode("utf-8"),
-                               file_name="supplier_followups_open.csv", mime="text/csv")
-        with cdl2:
-            if followups_full is not None and not followups_full.empty:
-                st.download_button("Download FULL Follow-ups CSV (Includes resolved/notes)",
-                                   data=followups_full.to_csv(index=False).encode("utf-8"),
-                                   file_name="supplier_followups_full.csv", mime="text/csv")
-
-        st.divider()
-        st.markdown("### Supplier Email Generator (3 questions)")
-
-        supplier_list = followups_for_ops["supplier_name"].dropna().astype(str).tolist() if "supplier_name" in followups_for_ops.columns else []
-        if not supplier_list:
-            st.caption("Missing supplier_name in followups.")
-        else:
-            chosen = st.selectbox("Supplier", supplier_list, key="supplier_email_gen_select")
-            row = followups_for_ops[followups_for_ops["supplier_name"].astype(str) == str(chosen)].iloc[0]
-
-            supplier_email = str(row.get("supplier_email", "")).strip()
-            supplier_name = str(row.get("supplier_name", "")).strip()
-            order_ids = str(row.get("order_ids", row.get("order_id", ""))).strip()
-            urgency = str(row.get("urgency", row.get("worst_escalation", "High"))).strip()
-
-            subject_default = f"Action required: shipment status update — {supplier_name}"
-            subject = st.text_input("Subject", value=subject_default, key="supplier_email_subject")
-
-            q1 = st.text_input("Question 1", value="What is the current status of these shipment(s)?", key="sup_q1")
-            q2 = st.text_input("Question 2", value="What is the updated ship date / delivery ETA?", key="sup_q2")
-            q3 = st.text_input("Question 3", value="Please confirm carrier + tracking (or next step if not shipped).", key="sup_q3")
-
-            intro = st.text_area(
-                "Intro (optional)",
-                value=f"Hi {supplier_name},\n\nWe need an urgent update on the following order(s): {order_ids}\nUrgency: {urgency}\n",
-                height=110,
-                key="supplier_email_intro",
-            )
-
-            closing = st.text_area(
-                "Closing (optional)",
-                value="Thanks — please reply ASAP so we can update the customer.\n\nBest,\nOps Team",
-                height=110,
-                key="supplier_email_closing",
-            )
-
-            body = "\n".join([
-                intro.strip(),
-                "",
-                "Questions:",
-                f"• {q1}",
-                f"• {q2}",
-                f"• {q3}",
-                "",
-                closing.strip(),
-            ]).strip()
-
-            st.markdown("**To**")
-            st.code(supplier_email if supplier_email else "(missing supplier email — upload suppliers.csv)")
-
-            st.markdown("**Body preview**")
-            st.text_area(" ", value=body, height=220, key="supplier_email_preview", label_visibility="collapsed")
-
-            cc1, cc2, cc3, cc4 = st.columns(4)
-            with cc1:
-                copy_button(supplier_email, "Copy To", key=f"copy_sup_to_{chosen}")
-            with cc2:
-                copy_button(subject, "Copy Subject", key=f"copy_sup_subject_{chosen}")
-            with cc3:
-                copy_button(body, "Copy Body", key=f"copy_sup_body_{chosen}")
-            with cc4:
-                st.download_button(
-                    "Download .txt",
-                    data=(f"To: {supplier_email}\nSubject: {subject}\n\n{body}").encode("utf-8"),
-                    file_name=f"supplier_email_{str(supplier_name).replace(' ', '_').lower()}.txt",
-                    mime="text/plain",
-                    use_container_width=True,
-                    key="sup_email_txt_dl",
-                )
-
-            # Issue Tracker UI (if available)
-            if render_issue_tracker_ui is not None and IssueTrackerStore is not None and "issue_id" in followups_full.columns:
-                with st.expander("Issue Tracker (Resolve + Notes)", expanded=False):
-                    try:
-                        render_issue_tracker_ui(followups_full=followups_full)
-                    except Exception:
-                        st.caption("Issue tracker UI failed to render.")
-
-# -------------------------------
-# Customer emails (compact, non-repetitive)
-# -------------------------------
-with tab_cust:
-    # Candidates list (doesn't take over page)
+# --- Customer Emails (compact + tabs) ---
+with st.expander("Customer Emails (Auto-generated)", expanded=True):
     with st.expander("Customer impact candidates (view list)", expanded=False):
         if render_customer_impact_view is not None and isinstance(customer_impact, pd.DataFrame):
             try:
@@ -1517,37 +1510,131 @@ with tab_cust:
         else:
             st.warning("customer_comms_ui not available; customer emails UI is disabled.")
 
-# -------------------------------
-# Comms pack download (kept with comms)
-# -------------------------------
-with tab_pack:
-    st.caption("Download a combined outreach pack (supplier follow-ups + customer comms candidates).")
-    if render_comms_pack_download is not None:
-        try:
-            render_comms_pack_download(followups=followups_open, customer_impact=customer_impact)
-        except Exception:
-            st.caption("Comms pack UI failed to render.")
+# --- Supplier Follow-ups (existing section continues below, plus comms pack) ---
+with st.expander("Supplier Follow-ups (Copy/Paste Ready)", expanded=True):
+    followups_for_ops = followups_open if isinstance(followups_open, pd.DataFrame) else followups
+
+    if followups_for_ops is None or followups_for_ops.empty:
+        st.info("No follow-ups needed.")
     else:
-        st.caption("comms_pack_ui not available.")
+        summary_cols = [
+            c for c in ["supplier_name", "supplier_email", "worst_escalation", "urgency", "item_count", "order_ids"]
+            if c in followups_for_ops.columns
+        ]
+        if summary_cols:
+            st.dataframe(followups_for_ops[summary_cols], use_container_width=True, height=220)
+        else:
+            st.dataframe(followups_for_ops, use_container_width=True, height=220)
 
+        # Keep your classic preview if body exists
+        if "supplier_name" in followups_for_ops.columns and "body" in followups_for_ops.columns and len(followups_for_ops) > 0:
+            st.divider()
+            st.markdown("### Email preview (select a supplier)")
 
-# ============================================================
-# SLA ESCALATIONS (optional panel)
-# ============================================================
-if isinstance(escalations_df, pd.DataFrame) and not escalations_df.empty:
-    st.divider()
-    st.subheader("SLA Escalations (Supplier-level)")
-    st.dataframe(escalations_df, use_container_width=True, height=260)
+            chosen = st.selectbox(
+                "Supplier",
+                followups_for_ops["supplier_name"].tolist(),
+                key="supplier_email_preview_select",
+            )
+            row = followups_for_ops[followups_for_ops["supplier_name"] == chosen].iloc[0]
 
+            supplier_email = str(row.get("supplier_email", "")).strip()
+            subject = str(row.get("subject", "Shipment status update requested")).strip()
+            body = str(row.get("body", "")).strip()
 
-# ============================================================
-# Supplier accountability (optional)
-# ============================================================
-if build_supplier_accountability_view is not None and render_supplier_accountability is not None:
+            s1, s2, s3 = st.columns(3)
+            with s1:
+                copy_button(supplier_email, "Copy To", key=f"copy_supplier_to_{chosen}")
+            with s2:
+                copy_button(subject, "Copy Subject", key=f"copy_supplier_subject_{chosen}")
+            with s3:
+                copy_button(body, "Copy Body", key=f"copy_supplier_body_{chosen}")
+
+            st.download_button(
+                "Download supplier email as .txt",
+                data=(f"To: {supplier_email}\nSubject: {subject}\n\n{body}").encode("utf-8"),
+                file_name=f"supplier_email_{str(chosen)}".replace(" ", "_").lower() + ".txt",
+                mime="text/plain",
+                key="btn_download_supplier_email_txt",
+            )
+
+# Comms pack download (kept in comms group)
+if render_comms_pack_download is not None:
     try:
-        st.divider()
-        st.subheader("Supplier Accountability")
-        acct = build_supplier_accountability_view(exceptions=exceptions, followups=followups_open)
-        render_supplier_accountability(acct)
+        render_comms_pack_download(followups=followups_open, customer_impact=customer_impact)
     except Exception:
         pass
+
+
+# -------------------------------
+# Exceptions Queue (Action this first)
+# -------------------------------
+st.divider()
+st.subheader("Exceptions Queue (Action this first)")
+
+if exceptions is None or exceptions.empty:
+    st.info("No exceptions found 🎉")
+else:
+    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+
+    with fcol1:
+        issue_types = sorted(exceptions["issue_type"].dropna().unique().tolist()) if "issue_type" in exceptions.columns else []
+        issue_filter = st.multiselect("Issue types", issue_types, default=issue_types)
+
+    with fcol2:
+        countries = sorted(
+            [c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist()
+             if str(c).strip() != ""]
+        )
+        country_filter = st.multiselect("Customer country", countries, default=countries)
+
+    with fcol3:
+        suppliers = sorted(
+            [s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist()
+             if str(s).strip() != ""]
+        )
+        supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers)
+
+    with fcol4:
+        urgencies = ["Critical", "High", "Medium", "Low"]
+        urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies)
+
+    filtered = exceptions.copy()
+    if issue_filter and "issue_type" in filtered.columns:
+        filtered = filtered[filtered["issue_type"].isin(issue_filter)]
+    if country_filter and "customer_country" in filtered.columns:
+        filtered = filtered[filtered["customer_country"].isin(country_filter)]
+    if supplier_filter and "supplier_name" in filtered.columns:
+        filtered = filtered[filtered["supplier_name"].isin(supplier_filter)]
+    if urgency_filter and "Urgency" in filtered.columns:
+        filtered = filtered[filtered["Urgency"].isin(urgency_filter)]
+
+    # ✅ FIX: no errors="ignore" (pandas sort_values doesn't support it)
+    sort_cols = [c for c in ["Urgency", "order_id"] if c in filtered.columns]
+    if sort_cols:
+        filtered = filtered.sort_values(sort_cols, ascending=True)
+
+    preferred_cols = [
+        "Urgency",
+        "order_id",
+        "sku",
+        "issue_type",
+        "customer_country",
+        "supplier_name",
+        "quantity_ordered",
+        "quantity_shipped",
+        "line_status",
+        "explanation",
+        "next_action",
+        "customer_risk",
+    ]
+    show_cols = [c for c in preferred_cols if c in filtered.columns]
+
+    st.dataframe(style_exceptions_table(filtered[show_cols]), use_container_width=True, height=420)
+
+    st.download_button(
+        "Download Exceptions CSV",
+        data=filtered.to_csv(index=False).encode("utf-8"),
+        file_name="exceptions_queue.csv",
+        mime="text/csv",
+    )
