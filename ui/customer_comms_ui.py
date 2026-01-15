@@ -169,16 +169,21 @@ def render_customer_comms_ui(
             key="cust_email_bulk_csv_ui",
         )
 
-        import zipfile
+        import zipfile as _zipfile
 
         buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as z:
             for _, r in emails_df.iterrows():
                 oid = _safe_str(r.get("order_id", "order"))
                 fn = f"customer_email_{oid.replace(' ', '_').lower()}.txt"
-                z.writestr(fn, _download_txt(r.get("to_email", ""), r.get("subject", ""), r.get("body", "")).decode("utf-8"))
-        buf.seek(0)
+                payload = _download_txt(
+                    _safe_str(r.get("to_email", "")),
+                    _safe_str(r.get("subject", "")),
+                    _safe_str(r.get("body", "")),
+                ).decode("utf-8")
+                z.writestr(fn, payload)
 
+        buf.seek(0)
         st.download_button(
             "Download all emails (.zip)",
             data=buf.read(),
