@@ -51,6 +51,7 @@ except Exception:
     render_sla_escalations = None
 
 try:
+    # Your current core/issue_tracker.py may NOT have CONTACT_STATUSES yet.
     from core.issue_tracker import IssueTrackerStore, CONTACT_STATUSES  # type: ignore
 except Exception:
     IssueTrackerStore = None
@@ -293,6 +294,14 @@ def get_allowed_emails() -> list[str]:
 
 
 def require_email_access_gate():
+    """
+    IMPORTANT: This gate must render only once.
+    This session flag prevents accidental duplicate rendering if some code path calls it twice.
+    """
+    if st.session_state.get("_email_gate_ran", False):
+        return
+    st.session_state["_email_gate_ran"] = True
+
     # 🔓 Public review bypass
     if PUBLIC_REVIEW_MODE:
         return
@@ -768,11 +777,108 @@ def _reset_demo_tables(data_dir: Path):
     st.session_state["demo_raw_tracking"] = pd.read_csv(data_dir / "raw_tracking.csv")
 
 
+# -------------------------------
+# Contact tracking helpers (works even if core.issue_tracker has NOT been upgraded)
+# -------------------------------
+def _ensure_contact_struct(rec: dict) -> dict:
+    if not isinstance(rec, dict):
+        rec = {}
+    c = rec.get("contact", {})
+    if not isinstance(c, dict):
+        c = {}
+    # defaults
+    c.setdefault("status", "Not Contacted")
+    c.setdefault("channel", "")
+    c.setdefault("last_contacted_at", "")
+    c.setdefault("follow_up_count", 0)
+    c.setdefault("notes", "")
+    rec["contact"] = c
+    return rec
+
+
+def _issue_get_contact(store, issue_id: str) -> dict:
+    data = store.load()
+    rec = data.get(str(issue_id), {}) if isinstance(data.get(str(issue_id), {}), dict) else {}
+    rec = _ensure_contact_struct(rec)
+    return rec.get("contact", {})
+
+
+def _issue_set_contact(store, issue_id: str, contact_patch: dict, append_note: str | None = None) -> None:
+    issue_id = str(issue_id or "").strip()
+    if not issue_id:
+        return
+    data = store.load()
+    rec = data.get(issue_id, {}) if isinstance(data.get(issue_id, {}), dict) else {}
+    rec = _ensure_contact_struct(rec)
+
+    c = rec.get("contact", {})
+    if not isinstance(c, dict):
+        c = {}
+    for k, v in (contact_patch or {}).items():
+        c[k] = v
+
+    if append_note:
+        prev = str(c.get("notes", "") or "")
+        stamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        line = f"[{stamp}] {append_note}".strip()
+        c["notes"] = (prev + ("\n" if prev else "") + line).strip()
+
+    rec["contact"] = c
+    data[issue_id] = rec
+    store.save(data)
+
+
+def _mark_contacted(store, issue_id: str, channel: str = "email", note: str = "", new_status: str = "Contacted"):
+    patch = {
+        "status": new_status,
+        "channel": channel,
+        "last_contacted_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    }
+    _issue_set_contact(store, issue_id, patch, append_note=note or "Marked contacted")
+
+
+def _increment_followup(store, issue_id: str, channel: str = "email", note: str = "Follow-up sent"):
+    c = _issue_get_contact(store, issue_id)
+    try:
+        n = int(c.get("follow_up_count", 0) or 0) + 1
+    except Exception:
+        n = 1
+    patch = {
+        "follow_up_count": n,
+        "channel": channel,
+        "last_contacted_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "status": c.get("status", "Contacted") or "Contacted",
+    }
+    _issue_set_contact(store, issue_id, patch, append_note=note)
+
+
+def _set_contact_status(store, issue_id: str, status: str):
+    patch = {"status": status}
+    _issue_set_contact(store, issue_id, patch, append_note=f"Status set to {status}")
+
+
 # ============================================================
 # Page setup
 # ============================================================
 st.set_page_config(page_title="Dropship Hub", layout="wide")
 
+# -------------------------------
+# Early access code gate (ONLY once)
+# -------------------------------
+ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
+if not PUBLIC_REVIEW_MODE:
+    # Prevent accidental duplicate rendering
+    if not st.session_state.get("_access_gate_ran", False):
+        st.session_state["_access_gate_ran"] = True
+        code = st.text_input("Enter early access code", type="password", key="auth_access_code")
+        if code != ACCESS_CODE:
+            st.info("This app is currently in early access. Enter your code to continue.")
+            st.stop()
+    else:
+        # If some other path tried to render again, do nothing
+        pass
+
+# Email allowlist gate (ONLY once; guarded inside function)
 require_email_access_gate()
 
 
@@ -832,11 +938,21 @@ with st.sidebar:
 
     st.divider()
     st.header("Demo Mode (Sticky)")
-    demo_mode = st.toggle(
-        "Use demo data (sticky)",
-        key="demo_mode",
-        help="Keeps demo data and your edits across interactions until you reset or turn off demo mode.",
-    )
+
+    # IMPORTANT: prevent DuplicateElementKey for demo_mode if another file/page also creates it.
+    # We create the widget only once per session run; otherwise we just read the state.
+    if "_demo_toggle_drawn" not in st.session_state:
+        st.session_state["_demo_toggle_drawn"] = False
+
+    if not st.session_state["_demo_toggle_drawn"]:
+        demo_mode = st.toggle(
+            "Use demo data (sticky)",
+            key="demo_mode",
+            help="Keeps demo data and your edits across interactions until you reset or turn off demo mode.",
+        )
+        st.session_state["_demo_toggle_drawn"] = True
+    else:
+        demo_mode = st.session_state.get("demo_mode", False)
 
     _init_demo_tables_if_needed(DATA_DIR)
 
@@ -1149,9 +1265,12 @@ if render_sla_escalations is not None:
         pass
 
 # OPEN derived from FULL via Issue Tracker flags (per-tenant)
+ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
+ws_root.mkdir(parents=True, exist_ok=True)
+ISSUE_TRACKER_PATH = Path(ws_root) / "issue_tracker.json"
+
 if IssueTrackerStore is not None and not followups_full.empty and "issue_id" in followups_full.columns:
-    ws_root_for_store = workspace_root(WORKSPACES_DIR, account_id, store_id)
-    store = IssueTrackerStore(Path(ws_root_for_store) / "issue_tracker.json")
+    store = IssueTrackerStore(ISSUE_TRACKER_PATH)
     issue_map = store.load()
 
     followups_open = followups_full.copy()
@@ -1169,10 +1288,6 @@ followups = followups_open
 # -------------------------------
 # Workspaces UI (sidebar)
 # -------------------------------
-ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
-ws_root.mkdir(parents=True, exist_ok=True)
-ISSUE_TRACKER_PATH = Path(ws_root) / "issue_tracker.json"
-
 if IssueTrackerStore is not None:
     st.caption(f"Issue tracker file: `{ISSUE_TRACKER_PATH.as_posix()}`")
 
@@ -1523,9 +1638,9 @@ with tab1:
             )
 
             # -------------------------------
-            # NEW: One-click compose + Follow-up tracking
+            # One-click compose + Follow-up tracking (works with current IssueTrackerStore)
             # -------------------------------
-            if IssueTrackerStore is not None and mailto_link is not None:
+            if IssueTrackerStore is not None:
                 store = IssueTrackerStore(ISSUE_TRACKER_PATH)
 
                 issue_ids = []
@@ -1537,21 +1652,29 @@ with tab1:
                         .tolist()
                     )
 
-                compose_url = mailto_link(supplier_email, subj, body)
+                compose_url = None
+                if mailto_link is not None:
+                    try:
+                        compose_url = mailto_link(supplier_email, subj, body)
+                    except Exception:
+                        compose_url = None
 
                 ccA, ccB, ccC = st.columns(3)
                 with ccA:
-                    # Streamlit link button is optional; markdown works everywhere
-                    try:
-                        st.link_button("📧 One-click compose email", compose_url, use_container_width=True)
-                    except Exception:
-                        st.markdown(f"[📧 One-click compose email]({compose_url})")
-                    st.caption("Opens your email app with To/Subject/Body filled")
+                    if compose_url:
+                        try:
+                            st.link_button("📧 One-click compose email", compose_url, use_container_width=True)
+                        except Exception:
+                            st.markdown(f"[📧 One-click compose email]({compose_url})")
+                        st.caption("Opens your email app with To/Subject/Body filled")
+                    else:
+                        st.caption("One-click compose not available (core/email_utils.py missing).")
 
                 with ccB:
                     if st.button("✅ Mark contacted", key=f"btn_mark_contacted_{chosen}"):
                         for iid in issue_ids:
-                            store.mark_contacted(
+                            _mark_contacted(
+                                store,
                                 iid,
                                 channel="email",
                                 note=f"Supplier email composed/sent to {supplier_email}",
@@ -1563,7 +1686,7 @@ with tab1:
                 with ccC:
                     if st.button("🔁 Follow-up +1", key=f"btn_followup_plus1_{chosen}"):
                         for iid in issue_ids:
-                            store.increment_followup(iid, channel="email", note="Follow-up sent")
+                            _increment_followup(store, iid, channel="email", note="Follow-up sent")
                         st.success(f"Recorded follow-up for {len(issue_ids)} issue(s).")
                         st.rerun()
 
@@ -1575,7 +1698,7 @@ with tab1:
                 )
                 if st.button("Save status for all supplier issues", key=f"btn_status_bulk_{chosen}"):
                     for iid in issue_ids:
-                        store.set_contact_status(iid, new_status)
+                        _set_contact_status(store, iid, new_status)
                     st.success(f"Set status to {new_status} for {len(issue_ids)} issue(s).")
                     st.rerun()
 
