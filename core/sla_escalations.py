@@ -1,261 +1,232 @@
 # core/sla_escalations.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 import pandas as pd
-from datetime import datetime
 
 
-# ----------------------------
+# -------------------------------
 # Helpers
-# ----------------------------
-def _to_dt(series) -> pd.Series:
+# -------------------------------
+def _now_utc() -> pd.Timestamp:
+    # Always timezone-aware
+    return pd.Timestamp.now(tz="UTC")
+
+
+def _to_utc(series: pd.Series) -> pd.Series:
+    """
+    Convert a Series to timezone-aware UTC datetimes safely.
+
+    Handles:
+      - strings
+      - tz-naive datetimes
+      - tz-aware datetimes (converts to UTC)
+      - mixed/invalid values => NaT
+    """
+    if series is None:
+        return pd.Series([], dtype="datetime64[ns, UTC]")
+
+    s = pd.to_datetime(series, errors="coerce", utc=True)
+
+    # If conversion produced tz-naive dtype (rare edge), localize
+    # (most times utc=True already yields tz-aware)
     try:
-        return pd.to_datetime(series, errors="coerce")
+        if getattr(s.dt, "tz", None) is None:
+            s = s.dt.tz_localize("UTC")
     except Exception:
-        return pd.Series([pd.NaT] * len(series))
+        # If s isn't datetime-like for some reason, re-coerce
+        s = pd.to_datetime(series, errors="coerce", utc=True)
+
+    return s
 
 
-def _now() -> pd.Timestamp:
-    # Use local naive timestamp (works fine for relative “days past due”)
-    return pd.Timestamp(datetime.now())
+def _safe_col(df: pd.DataFrame, name: str) -> bool:
+    return df is not None and not df.empty and name in df.columns
 
 
-def _pick_first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+def _pick_due_date_col(df: pd.DataFrame) -> str | None:
+    """
+    Choose the best due-date style column present in line_status_df.
+    """
+    candidates = [
+        "sla_due_date",
+        "promised_ship_date",
+        "ship_by_date",
+        "sla_due_dt",
+        "due_date",
+    ]
     for c in candidates:
-        if c in df.columns:
+        if _safe_col(df, c):
             return c
     return None
 
 
-def _normalize_status(s: str) -> str:
-    return (s or "").strip().lower()
+def _pick_created_date_col(df: pd.DataFrame) -> str | None:
+    candidates = [
+        "order_created_at",
+        "order_datetime_utc",
+        "order_date",
+        "created_at",
+        "created_datetime",
+    ]
+    for c in candidates:
+        if _safe_col(df, c):
+            return c
+    return None
 
 
-def _escalation_level(days_past_due: float, days_to_due: float) -> str:
-    """
-    days_past_due > 0 means overdue.
-    days_to_due >= 0 means not overdue.
-    """
-    # Overdue buckets
-    if days_past_due > 3:
-        return "Escalate"
-    if days_past_due > 1:
-        return "Firm Follow-up"
-    if days_past_due > 0:
-        return "Reminder"
-
-    # Not overdue yet: "at risk" window
-    if days_to_due <= 3:
-        return "At Risk (72h)"
-    return "On Track"
+# -------------------------------
+# Output model (optional)
+# -------------------------------
+@dataclass
+class SlaEscalationConfig:
+    promised_ship_days: int = 3
+    grace_days: int = 0
+    at_risk_hours: int = 72  # show items due within next N hours
 
 
-def draft_escalation_email(
-    supplier_name: str,
-    level: str,
-    order_ids: list[str],
-    sku_count: int,
-    max_days_past_due: float,
-    max_days_to_due: float,
-) -> tuple[str, str]:
-    """
-    Returns (subject, body). Keep it blunt + usable.
-    """
-    supplier_name = (supplier_name or "").strip() or "Supplier"
-    order_blob = ", ".join([str(o) for o in order_ids[:10] if str(o).strip()])
-    if len(order_ids) > 10:
-        order_blob += f" (+{len(order_ids) - 10} more)"
-
-    base_subject = "Action required: outstanding shipments"
-
-    if level == "At Risk (72h)":
-        subject = f"{base_subject} — confirm ship date/tracking (due soon)"
-        body = (
-            f"Hi {supplier_name},\n\n"
-            f"We have {sku_count} item(s) across order(s): {order_blob} that are coming due within ~{max_days_to_due:.1f} day(s).\n"
-            "Can you confirm:\n"
-            "1) Ship date, and\n"
-            "2) Tracking number(s) as soon as available?\n\n"
-            "Thanks,\n"
-        )
-        return subject, body
-
-    if level == "Reminder":
-        subject = f"{base_subject} — quick check-in"
-        body = (
-            f"Hi {supplier_name},\n\n"
-            f"Quick check-in on {sku_count} item(s) across order(s): {order_blob}.\n"
-            f"These appear overdue by ~{max_days_past_due:.1f} day(s). Please confirm ship date + tracking.\n\n"
-            "Thank you,\n"
-        )
-        return subject, body
-
-    if level == "Firm Follow-up":
-        subject = f"{base_subject} — tracking/ship date needed today"
-        body = (
-            f"Hi {supplier_name},\n\n"
-            f"We still need tracking or an updated ship date for {sku_count} item(s) across order(s): {order_blob}.\n"
-            f"These are overdue by up to ~{max_days_past_due:.1f} day(s).\n\n"
-            "Please reply today with either:\n"
-            "1) Tracking number(s), or\n"
-            "2) Confirmed ship date (with reason for delay)\n\n"
-            "Thanks,\n"
-        )
-        return subject, body
-
-    if level == "Escalate":
-        subject = f"{base_subject} — escalation: SLA breach"
-        body = (
-            f"Hi {supplier_name},\n\n"
-            f"These shipments are now beyond SLA. We need tracking or a confirmed ship date immediately for "
-            f"{sku_count} item(s) across order(s): {order_blob}.\n"
-            f"Overdue by up to ~{max_days_past_due:.1f} day(s).\n\n"
-            "If we do not receive an update within 24 hours, we will need to re-route fulfillment or cancel/replace.\n\n"
-            "Please respond ASAP.\n"
-        )
-        return subject, body
-
-    # On Track fallback
-    return base_subject, (
-        f"Hi {supplier_name},\n\n"
-        f"Just confirming status for {sku_count} item(s) across order(s): {order_blob}.\n"
-        "Please share ship date + tracking when available.\n\n"
-        "Thanks,\n"
-    )
-
-
-# ----------------------------
-# Main builder
-# ----------------------------
+# -------------------------------
+# Core builder
+# -------------------------------
 def build_sla_escalations(
     line_status_df: pd.DataFrame,
     followups: pd.DataFrame,
     promised_ship_days: int = 3,
-    grace_days: int = 1,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    grace_days: int = 0,
+    at_risk_hours: int = 72,
+):
     """
     Returns:
-      - escalations_df: per-supplier summary of unshipped lines that are at-risk / overdue
-      - updated_followups: followups merged with worst_escalation + suggested subject/body (does not overwrite unless caller chooses)
+      escalations_df, updated_followups_df
+
+    escalations_df: supplier-level summary with counts by escalation bucket
+    updated_followups_df: followups annotated with worst escalation bucket
     """
-    if line_status_df is None or line_status_df.empty:
-        return pd.DataFrame(), followups
+    df = line_status_df.copy() if line_status_df is not None else pd.DataFrame()
+    fu = followups.copy() if followups is not None else pd.DataFrame()
 
-    df = line_status_df.copy()
-
-    # Required: supplier_name
-    if "supplier_name" not in df.columns:
-        return pd.DataFrame(), followups
-
-    df["supplier_name"] = df["supplier_name"].fillna("").astype(str)
-    df = df[df["supplier_name"].str.strip() != ""].copy()
     if df.empty:
-        return pd.DataFrame(), followups
+        return pd.DataFrame(), fu
 
-    # Determine date basis:
-    # Prefer promised_ship_date if present, else created/order date + promised_ship_days
-    promised_col = _pick_first_col(df, ["promised_ship_date", "promised_ship_at", "sla_due_date", "ship_by_date"])
-    created_col = _pick_first_col(df, ["order_created_at", "order_date", "created_at", "order_created", "order_created_datetime"])
+    if "supplier_name" not in df.columns:
+        return pd.DataFrame(), fu
 
-    now = _now()
+    # Determine due date
+    due_col = _pick_due_date_col(df)
+    created_col = _pick_created_date_col(df)
 
-    if promised_col:
-        df["_due_dt"] = _to_dt(df[promised_col])
-    elif created_col:
-        df["_created_dt"] = _to_dt(df[created_col])
-        df["_due_dt"] = df["_created_dt"] + pd.to_timedelta(int(promised_ship_days) + int(grace_days), unit="D")
+    # If we don't have a due date column, compute from created + promised_ship_days
+    if due_col is None:
+        if created_col is None:
+            # no usable timing fields
+            return pd.DataFrame(), fu
+
+        df["_created_dt"] = _to_utc(df[created_col])
+        # compute due in UTC
+        df["_due_dt"] = df["_created_dt"] + pd.to_timedelta(int(promised_ship_days), unit="D")
     else:
-        # Can't compute anything useful without any date
-        return pd.DataFrame(), followups
+        df["_due_dt"] = _to_utc(df[due_col])
 
-    # Identify shipped/delivered vs unshipped
-    status_col = _pick_first_col(df, ["line_status", "status", "shipment_status"])
-    if status_col:
-        s = df[status_col].astype(str).map(_normalize_status)
-        is_done = s.str.contains("delivered|shipped", regex=True, na=False)
-    else:
-        # If no status column, assume not done (conservative)
-        is_done = pd.Series([False] * len(df))
+    # Apply grace window (still UTC)
+    if grace_days and int(grace_days) != 0:
+        df["_due_dt"] = df["_due_dt"] + pd.to_timedelta(int(grace_days), unit="D")
 
-    is_unshipped = ~is_done
+    # Must have at least some due dates
+    if df["_due_dt"].isna().all():
+        return pd.DataFrame(), fu
 
-    # Days to due / past due
-    df["_days_to_due"] = (df["_due_dt"] - now).dt.total_seconds() / 86400.0
-    df["_days_past_due"] = (now - df["_due_dt"]).dt.total_seconds() / 86400.0
+    # Choose "open" lines to consider for escalation
+    # We focus on not-yet-shipped OR missing tracking situations
+    status = df.get("line_status", pd.Series([""] * len(df))).astype(str).fillna("")
+    issue = df.get("issue_type", pd.Series([""] * len(df))).astype(str).fillna("")
+    is_open = status.isin(["UNSHIPPED", "PARTIALLY_SHIPPED"]) | issue.str.contains("MISSING_TRACKING", na=False)
 
-    # Only meaningful for unshipped lines
-    df["_days_past_due"] = df["_days_past_due"].where(is_unshipped, 0).fillna(0)
-    df["_days_to_due"] = df["_days_to_due"].where(is_unshipped, 9999).fillna(9999)
+    work = df[is_open].copy()
+    if work.empty:
+        return pd.DataFrame(), fu
 
-    df["escalation_level"] = df.apply(
-        lambda r: _escalation_level(float(r.get("_days_past_due", 0)), float(r.get("_days_to_due", 9999))),
-        axis=1,
+    now = _now_utc()
+
+    # ✅ FIX: both sides are tz-aware UTC now, subtraction always works
+    work["_days_to_due"] = (work["_due_dt"] - now).dt.total_seconds() / 86400.0
+
+    # Bucket logic
+    # - Overdue => Escalate / Firm follow-up depending on how late
+    # - Due soon => At Risk / Reminder
+    at_risk_days = float(at_risk_hours) / 24.0
+
+    def _bucket(days_to_due: float) -> str:
+        if pd.isna(days_to_due):
+            return "Unknown"
+        if days_to_due < -3:
+            return "Escalate"
+        if days_to_due < 0:
+            return "Firm Follow-up"
+        if days_to_due <= at_risk_days:
+            return "At Risk (72h)"
+        if days_to_due <= 7:
+            return "Reminder"
+        return "On Track"
+
+    work["_bucket"] = work["_days_to_due"].apply(_bucket)
+
+    # Supplier-level summary
+    grp = (
+        work.groupby(["supplier_name", "_bucket"])
+        .size()
+        .reset_index(name="open_lines")
     )
 
-    # Build per-supplier rollup on unshipped only
-    order_col = "order_id" if "order_id" in df.columns else None
-    sku_col = "sku" if "sku" in df.columns else None
+    pivot = grp.pivot_table(
+        index="supplier_name",
+        columns="_bucket",
+        values="open_lines",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
 
-    level_rank = {"Escalate": 4, "Firm Follow-up": 3, "Reminder": 2, "At Risk (72h)": 1, "On Track": 0}
+    # Ensure consistent columns
+    wanted = ["Escalate", "Firm Follow-up", "At Risk (72h)", "Reminder", "On Track", "Unknown"]
+    for c in wanted:
+        if c not in pivot.columns:
+            pivot[c] = 0
 
-    rows = []
-    for supplier, g in df[is_unshipped].groupby("supplier_name"):
-        if g.empty:
-            continue
+    pivot["open_lines_total"] = pivot[wanted].sum(axis=1)
 
-        levels = g["escalation_level"].astype(str).unique().tolist()
-        worst_level = sorted(levels, key=lambda x: level_rank.get(x, 0), reverse=True)[0]
+    # Worst escalation label per supplier
+    def _worst(row) -> str:
+        if int(row.get("Escalate", 0)) > 0:
+            return "Escalate"
+        if int(row.get("Firm Follow-up", 0)) > 0:
+            return "Firm Follow-up"
+        if int(row.get("At Risk (72h)", 0)) > 0:
+            return "At Risk (72h)"
+        if int(row.get("Reminder", 0)) > 0:
+            return "Reminder"
+        if int(row.get("On Track", 0)) > 0:
+            return "On Track"
+        return "Unknown"
 
-        max_past = float(pd.to_numeric(g["_days_past_due"], errors="coerce").fillna(0).max())
-        min_to_due = float(pd.to_numeric(g["_days_to_due"], errors="coerce").fillna(9999).min())
-        max_to_due = float(pd.to_numeric(g["_days_to_due"], errors="coerce").fillna(9999).max())
+    pivot["worst_escalation"] = pivot.apply(_worst, axis=1)
 
-        order_ids = []
-        if order_col:
-            order_ids = [str(v) for v in g[order_col].dropna().unique().tolist() if str(v).strip() != ""]
+    # Order suppliers by worst escalation then volume
+    rank = {"Escalate": 5, "Firm Follow-up": 4, "At Risk (72h)": 3, "Reminder": 2, "On Track": 1, "Unknown": 0}
+    pivot["_rank"] = pivot["worst_escalation"].map(rank).fillna(0)
+    pivot = pivot.sort_values(["_rank", "open_lines_total"], ascending=[False, False]).drop(columns=["_rank"])
 
-        sku_count = int(g[sku_col].dropna().nunique()) if sku_col else int(len(g))
+    escalations_df = pivot[
+        ["supplier_name", "worst_escalation", "open_lines_total"]
+        + [c for c in wanted if c in pivot.columns]
+    ].copy()
 
-        subject_suggested, body_suggested = draft_escalation_email(
-            supplier_name=supplier,
-            level=worst_level,
-            order_ids=order_ids,
-            sku_count=sku_count,
-            max_days_past_due=max_past,
-            max_days_to_due=min_to_due,
-        )
-
-        rows.append(
-            {
-                "supplier_name": supplier,
-                "unshipped_lines": int(len(g)),
-                "sku_count": sku_count,
-                "order_count": int(len(order_ids)),
-                "worst_escalation": worst_level,
-                "max_days_past_due": round(max_past, 2),
-                "min_days_to_due": round(min_to_due, 2),
-                "max_days_to_due": round(max_to_due, 2),
-                "subject_suggested": subject_suggested,
-                "body_suggested": body_suggested,
-            }
-        )
-
-    escalations = pd.DataFrame(rows)
-    if escalations.empty:
-        return escalations, followups
-
-    escalations["_rank"] = escalations["worst_escalation"].map(level_rank).fillna(0).astype(int)
-    escalations = escalations.sort_values(["_rank", "max_days_past_due", "unshipped_lines"], ascending=[False, False, False]).drop(columns=["_rank"])
-
-    # Merge escalation summary onto followups (non-destructive; caller can choose to overwrite subject/body)
-    updated_followups = followups
-    if followups is not None and not followups.empty and "supplier_name" in followups.columns:
-        f = followups.copy()
-        f = f.merge(
-            escalations[["supplier_name", "worst_escalation", "max_days_past_due", "min_days_to_due", "subject_suggested", "body_suggested"]],
+    # Annotate followups with escalation status
+    updated_fu = fu.copy()
+    if not updated_fu.empty and "supplier_name" in updated_fu.columns:
+        updated_fu = updated_fu.merge(
+            escalations_df[["supplier_name", "worst_escalation"]],
             on="supplier_name",
             how="left",
         )
-        updated_followups = f
+        updated_fu["worst_escalation"] = updated_fu["worst_escalation"].fillna("On Track")
 
-    return escalations, updated_followups
+    return escalations_df, updated_fu
