@@ -1,108 +1,86 @@
-import streamlit as st
+# ui/supplier_accountability_ui.py
+from __future__ import annotations
+
 import pandas as pd
+import streamlit as st
+
+
+def _safe_sort(df: pd.DataFrame, by: str, ascending: bool = True) -> pd.DataFrame:
+    """Sort only if the column exists. (Avoids pandas 'errors=' kwargs crashes.)"""
+    if df is None or df.empty:
+        return df
+    if by in df.columns:
+        return df.sort_values(by=by, ascending=ascending, kind="mergesort")
+    return df
 
 
 def render_supplier_accountability(accountability: pd.DataFrame | None):
     """
-    Renders supplier accountability in a way that supports BOTH schemas:
+    UI for Supplier Accountability.
 
-    Schema A (older / conversation-style):
-      supplier_name, open_issues, critical, high, worst_escalation, next_action, owner, last_contacted
-
-    Schema B (current core/supplier_accountability.py scorecard-based):
-      supplier_name, pain_score, total_lines, exception_lines, exception_rate, critical, high,
-      missing_tracking_flags, late_flags, carrier_exception_flags
+    Supports BOTH schemas (old + new) by rendering best-effort columns:
+      supplier_name, worst_escalation, open_issues, critical, high,
+      next_action, owner, last_contacted, score, risk, notes
     """
     st.subheader("Supplier Accountability")
 
-    if accountability is None or accountability.empty:
+    if accountability is None or getattr(accountability, "empty", True):
         st.caption("No supplier accountability items available for this run.")
         return
 
     df = accountability.copy()
 
-    # Choose a preferred column order depending on what exists
-    schema_a_preferred = [
+    # Normalize a few common variants (schema tolerance)
+    rename_map = {}
+    if "supplier" in df.columns and "supplier_name" not in df.columns:
+        rename_map["supplier"] = "supplier_name"
+    if "escalation" in df.columns and "worst_escalation" not in df.columns:
+        rename_map["escalation"] = "worst_escalation"
+    if "actions" in df.columns and "next_action" not in df.columns:
+        rename_map["actions"] = "next_action"
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    preferred = [
         "supplier_name",
         "worst_escalation",
         "open_issues",
         "critical",
         "high",
+        "score",
+        "risk",
         "next_action",
         "owner",
         "last_contacted",
+        "notes",
     ]
-
-    schema_b_preferred = [
-        "supplier_name",
-        "pain_score",
-        "total_lines",
-        "exception_lines",
-        "exception_rate",
-        "critical",
-        "high",
-        "missing_tracking_flags",
-        "late_flags",
-        "carrier_exception_flags",
-    ]
-
-    if "pain_score" in df.columns:
-        preferred = schema_b_preferred
-    else:
-        preferred = schema_a_preferred
-
     cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+    df = df[cols]
 
     # Filters
     c1, c2, c3 = st.columns(3)
     with c1:
-        supplier = st.text_input("Filter supplier (contains)", value="", key="acct_filter_supplier")
+        supplier_q = st.text_input("Filter supplier", value="", key="sa_filter_supplier")
     with c2:
-        # If open_issues exists, filter on it. Else use exception_lines as the "open issues" proxy.
-        if "open_issues" in df.columns:
-            min_metric_label = "Min open issues"
-            metric_col = "open_issues"
-        elif "exception_lines" in df.columns:
-            min_metric_label = "Min exception lines"
-            metric_col = "exception_lines"
-        else:
-            min_metric_label = "Min rows (no metric)"
-            metric_col = None
-
-        min_open = st.number_input(min_metric_label, min_value=0, value=0, step=1, key="acct_filter_min_open")
+        min_open = st.number_input("Min open issues", min_value=0, value=0, step=1, key="sa_min_open")
     with c3:
-        show_top = st.slider("Show top N", min_value=5, max_value=100, value=25, step=5, key="acct_filter_topn")
+        show_only_escalated = st.checkbox("Only escalated", value=False, key="sa_only_escalated")
 
-    if "supplier_name" in df.columns and supplier.strip():
-        df = df[df["supplier_name"].fillna("").astype(str).str.lower().str.contains(supplier.strip().lower())]
+    if supplier_q:
+        if "supplier_name" in df.columns:
+            df = df[df["supplier_name"].astype(str).str.contains(supplier_q, case=False, na=False)]
 
-    if metric_col and metric_col in df.columns:
-        try:
-            df[metric_col] = pd.to_numeric(df[metric_col], errors="coerce").fillna(0)
-            df = df[df[metric_col] >= float(min_open)]
-        except Exception:
-            pass
+    if min_open and "open_issues" in df.columns:
+        df = df[pd.to_numeric(df["open_issues"], errors="coerce").fillna(0) >= float(min_open)]
 
-    # Sorting
-    if "pain_score" in df.columns:
-        try:
-            df["pain_score"] = pd.to_numeric(df["pain_score"], errors="coerce").fillna(0)
-        except Exception:
-            pass
-        df = df.sort_values(["pain_score"], ascending=False, errors="ignore")
-    else:
-        sort_cols = [c for c in ["open_issues", "critical", "high"] if c in df.columns]
-        if sort_cols:
-            df = df.sort_values(sort_cols, ascending=False, errors="ignore")
+    if show_only_escalated and "worst_escalation" in df.columns:
+        df = df[df["worst_escalation"].astype(str).str.strip().ne("").fillna(False)]
 
-    df = df.head(int(show_top))
+    # Sort (NO 'errors=' kwarg)
+    # Prefer sorting by "worst_escalation" or "open_issues" if present.
+    if "worst_escalation" in df.columns:
+        df = _safe_sort(df, "worst_escalation", ascending=True)
+    elif "open_issues" in df.columns:
+        df = _safe_sort(df, "open_issues", ascending=False)
 
-    st.dataframe(df[cols], use_container_width=True, height=360)
-
-    st.download_button(
-        "Download Supplier Accountability CSV",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name="supplier_accountability.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+    st.dataframe(df, use_container_width=True, hide_index=True)
