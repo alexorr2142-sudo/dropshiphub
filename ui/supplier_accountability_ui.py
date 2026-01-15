@@ -1,97 +1,66 @@
-# dropshiphub/ui/sla_escalations_ui.py
-from __future__ import annotations
-
-import pandas as pd
 import streamlit as st
-
-from dropshiphub.core.sla_escalations import build_sla_escalations
-from dropshiphub.core.issue_tracker import IssueTrackerStore
-from dropshiphub.ui.issue_tracker_ui import (
-    render_issue_tracker_editor,
-    apply_issue_tracker_fields,
-    filter_unresolved,
-)
+import pandas as pd
 
 
-def render_sla_escalations(
-    line_status_df: pd.DataFrame,
-    followups: pd.DataFrame,
-    promised_ship_days: int = 3,
-    grace_days: int = 0,
-    at_risk_hours: int = 72,
-):
+def render_supplier_accountability(accountability: pd.DataFrame | None):
     """
-    Step 3B: Wires the Issue Tracker (Resolved + Notes) into the SLA Exceptions UI.
-
-    Inputs:
-      - line_status_df: your line-level status table
-      - followups: your followups table (row-level preferred; supplier-level still works)
-      - promised_ship_days, grace_days, at_risk_hours: SLA settings
-
-    Returns:
-      (escalations_df, updated_followups_df, open_followups_df)
-        - updated_followups_df includes worst_escalation + issue_id (from Step 2) + Resolved/Notes (from store)
-        - open_followups_df filters out Resolved == True for operational use (emails, chasing, etc.)
+    Simple, safe UI wrapper for supplier accountability view.
+    Expected columns (best effort):
+      supplier_name, open_issues, critical, high, worst_escalation, next_action, owner
     """
-    st.header("SLA Exceptions")
+    st.subheader("Supplier Accountability")
 
-    # -------------------------------
-    # Build escalations + followups
-    # -------------------------------
-    escalations_df, updated_followups = build_sla_escalations(
-        line_status_df=line_status_df,
-        followups=followups,
-        promised_ship_days=int(promised_ship_days),
-        grace_days=int(grace_days),
-        at_risk_hours=int(at_risk_hours),
+    if accountability is None or accountability.empty:
+        st.caption("No supplier accountability items available for this run.")
+        return
+
+    df = accountability.copy()
+
+    # Prefer a clean column ordering if present
+    preferred = [
+        "supplier_name",
+        "worst_escalation",
+        "open_issues",
+        "critical",
+        "high",
+        "next_action",
+        "owner",
+        "last_contacted",
+    ]
+    cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+
+    # Light filtering controls
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        supplier = st.text_input("Filter supplier (contains)", value="", key="acct_filter_supplier")
+    with c2:
+        min_open = st.number_input("Min open issues", min_value=0, value=0, step=1, key="acct_filter_min_open")
+    with c3:
+        show_top = st.slider("Show top N", min_value=5, max_value=100, value=25, step=5, key="acct_filter_topn")
+
+    if "supplier_name" in df.columns and supplier.strip():
+        df = df[df["supplier_name"].fillna("").astype(str).str.lower().str.contains(supplier.strip().lower())]
+
+    if "open_issues" in df.columns:
+        try:
+            df["open_issues"] = pd.to_numeric(df["open_issues"], errors="coerce").fillna(0).astype(int)
+            df = df[df["open_issues"] >= int(min_open)]
+        except Exception:
+            pass
+
+    # Sort: most open issues first, then critical/high
+    sort_cols = [c for c in ["open_issues", "critical", "high"] if c in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols, ascending=False)
+
+    df = df.head(int(show_top))
+
+    st.dataframe(df[cols], use_container_width=True, height=360)
+
+    st.download_button(
+        "Download Supplier Accountability CSV",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name="supplier_accountability.csv",
+        mime="text/csv",
+        use_container_width=True,
     )
-
-    # -------------------------------
-    # Supplier escalation summary
-    # -------------------------------
-    st.subheader("Supplier Escalation Summary")
-    if escalations_df is None or escalations_df.empty:
-        st.info("No open SLA exceptions found.")
-    else:
-        st.dataframe(escalations_df, use_container_width=True, hide_index=True)
-
-    # -------------------------------
-    # Step 3B: Issue Tracker (Resolved + Notes)
-    # -------------------------------
-    st.divider()
-
-    # Ensure folder exists (safe no-op if already exists)
-    # (If you already do this in app.py, you can remove this.)
-    from pathlib import Path
-    Path("data").mkdir(parents=True, exist_ok=True)
-
-    # Attach current saved state (Resolved/Notes) before editor
-    store = IssueTrackerStore()
-    updated_followups = apply_issue_tracker_fields(updated_followups, store)
-
-    # Render editor that can update Resolved + Notes
-    edited_followups, saved = render_issue_tracker_editor(
-        updated_followups if updated_followups is not None else pd.DataFrame(),
-        title="Resolved + Notes (Issue Tracker)",
-        key="exceptions_issue_tracker",
-    )
-
-    # Re-apply fields after save (so the page reflects persisted state immediately)
-    if saved:
-        edited_followups = apply_issue_tracker_fields(edited_followups, store)
-
-    # Operational “open” list for downstream logic (emails, chasing, etc.)
-    open_followups = filter_unresolved(edited_followups)
-
-    # -------------------------------
-    # Show Open Followups (what you act on)
-    # -------------------------------
-    st.subheader("Open Followups (Unresolved Only)")
-    if open_followups is None or open_followups.empty:
-        st.success("Nothing open — all exceptions are resolved (or none exist).")
-    else:
-        st.dataframe(open_followups, use_container_width=True, hide_index=True)
-        st.caption(f"Open items: {len(open_followups)}")
-
-    # Return these so app.py (or other UI sections) can use open_followups for emails/templates
-    return escalations_df, edited_followups, open_followups
