@@ -43,6 +43,7 @@ from ui.customer_impact_ui import render_customer_impact_view
 from ui.supplier_accountability_ui import render_supplier_accountability
 from ui.comms_pack_ui import render_comms_pack_download
 from ui.kpi_trends_ui import render_kpi_trends
+from ui.sla_escalations_ui import render_sla_escalations
 
 
 # -------------------------------
@@ -68,6 +69,7 @@ def _startup_sanity_check():
         "core/supplier_accountability.py",
         "core/comms_pack.py",
         "core/kpi_trends.py",
+        "core/sla_escalations.py",
         "ui/__init__.py",
         "ui/auth.py",
         "ui/demo.py",
@@ -79,6 +81,7 @@ def _startup_sanity_check():
         "ui/supplier_accountability_ui.py",
         "ui/comms_pack_ui.py",
         "ui/kpi_trends_ui.py",
+        "ui/sla_escalations_ui.py",
     ]
     missing = [rel for rel in required if not (ROOT / rel).exists()]
     if missing:
@@ -184,12 +187,14 @@ with st.expander("Onboarding checklist", expanded=True):
 4. (Optional) Upload **Tracking CSV**  
 5. Click **Run reconciliation** (this refreshes outputs)  
 6. Click **Save this run** (daily) to build trend history  
-7. Review **Daily Action List** (what to do today)  
-8. Review **Customer Impact View** (draft customer messages)  
-9. Review **Bulk Comms Pack** (download today’s comms as ZIP)  
-10. Review **Supplier Accountability Mode** (supplier performance note)  
-11. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
-12. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
+7. Review **KPI Trends** (is the business improving?)  
+8. Review **Daily Action List** (what to do today)  
+9. Review **SLA Escalations** (auto-escalate suppliers)  
+10. Review **Customer Impact View** (draft customer messages)  
+11. Review **Bulk Comms Pack** (download today’s comms as ZIP)  
+12. Review **Supplier Accountability Mode** (supplier performance note)  
+13. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
+14. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
         """.strip()
     )
 
@@ -444,6 +449,16 @@ actions = build_daily_action_list(exceptions=exceptions, followups=followups, ma
 render_daily_action_list(actions)
 
 # -------------------------------
+# Supplier SLA Escalations (Feature #6)
+# (returns updated followups w/ escalated subject/body when applicable)
+# -------------------------------
+followups = render_sla_escalations(
+    line_status_df=line_status_df,
+    followups=followups,
+    promised_ship_days=int(default_promised_ship_days),
+)
+
+# -------------------------------
 # Customer Impact View (Feature #2)
 # -------------------------------
 customer_impact = build_customer_impact_view(exceptions=exceptions, max_items=50)
@@ -565,7 +580,7 @@ st.subheader("Supplier Follow-ups (Copy/Paste Ready)")
 if followups is None or followups.empty:
     st.info("No follow-ups needed.")
 else:
-    summary_cols = [c for c in ["supplier_name", "supplier_email", "urgency", "item_count", "order_ids"] if c in followups.columns]
+    summary_cols = [c for c in ["supplier_name", "supplier_email", "urgency", "item_count", "order_ids", "worst_escalation"] if c in followups.columns]
     if summary_cols:
         st.dataframe(followups[summary_cols], use_container_width=True, height=220)
     else:
