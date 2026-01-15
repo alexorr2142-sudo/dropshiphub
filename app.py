@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# ✅ NEW: used to keep resolved items resolved even when loading saved runs
+# ✅ Issue Tracker persistence + maintenance
 from core.issue_tracker import IssueTrackerStore
 
 
@@ -273,7 +273,7 @@ SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
-# Sidebar: plan + tenant + defaults + Supplier CRM
+# Sidebar: plan + tenant + defaults + Supplier CRM + Issue Tracker Maintenance
 # ============================================================
 with st.sidebar:
     st.header("Plan")
@@ -354,6 +354,44 @@ with st.sidebar:
 
     suppliers_df = st.session_state.get("suppliers_df", pd.DataFrame())
 
+    # ============================================================
+    # ✅ NEW: Issue Tracker Maintenance
+    # ============================================================
+    st.divider()
+    st.header("Issue Tracker Maintenance")
+
+    with st.expander("Maintenance tools", expanded=False):
+        store = IssueTrackerStore()
+        issue_map = store.load()
+
+        total = len(issue_map)
+        resolved = sum(1 for v in issue_map.values() if bool((v or {}).get("resolved", False)))
+        unresolved = total - resolved
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total", total)
+        c2.metric("Resolved", resolved)
+        c3.metric("Unresolved", unresolved)
+
+        st.caption("Prune keeps your tracker clean without losing short-term memory.")
+
+        prune_days = st.selectbox("Prune resolved older than…", [14, 30, 60, 90], index=1, key="it_prune_days")
+
+        if st.button("🧹 Prune old resolved", use_container_width=True, key="it_prune_btn"):
+            removed, remaining = store.prune_resolved(older_than_days=int(prune_days))
+            st.success(f"Pruned {removed} resolved item(s). Remaining tracker size: {remaining}.")
+            st.rerun()
+
+        st.divider()
+        st.markdown("**Danger zone**")
+        st.caption("This will remove ALL resolved items immediately (unresolved items remain).")
+
+        confirm_clear = st.checkbox("I understand this cannot be undone", key="it_clear_confirm")
+        if st.button("🗑️ Clear ALL resolved", disabled=not confirm_clear, use_container_width=True, key="it_clear_btn"):
+            removed, remaining = store.clear_resolved()
+            st.success(f"Cleared {removed} resolved item(s). Remaining tracker size: {remaining}.")
+            st.rerun()
+
 
 # ============================================================
 # Onboarding checklist
@@ -367,7 +405,7 @@ with st.expander("Onboarding checklist", expanded=True):
 3. Upload **Shipments CSV** (supplier / agent export)  
 4. (Optional) Upload **Tracking CSV**  
 5. Review **Exceptions** and use **Supplier Follow-ups** to message suppliers  
-6. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill supplier emails  
+6. (Optional) Upload **suppliers.csv** in the sidebar to auto-fill follow-up emails  
         """.strip()
     )
 
@@ -558,10 +596,9 @@ if MOD["add_missing_supplier_contact_exceptions"] is not None:
 
 # ============================================================
 # SLA Escalations + Issue Tracker
-# Place this AFTER followups exist and AFTER CRM enrichment
 # ============================================================
-followups_full = followups  # full snapshot (includes issue_id + notes/resolved when available)
-followups_open = followups  # operational list (unresolved only)
+followups_full = followups
+followups_open = followups
 
 if MOD["render_sla_escalations"] is not None:
     try:
@@ -570,7 +607,7 @@ if MOD["render_sla_escalations"] is not None:
             followups=followups,
             promised_ship_days=int(default_promised_ship_days),
         )
-        followups = followups_open  # downstream behavior uses open-only
+        followups = followups_open
     except TypeError:
         out = MOD["render_sla_escalations"](
             line_status_df=line_status_df,
@@ -617,7 +654,7 @@ if MOD["workspace_root"] is not None:
                 shipments=shipments,
                 tracking=tracking,
                 exceptions=exceptions,
-                followups=followups_full,  # ✅ save full snapshot
+                followups=followups_full,
                 order_rollup=order_rollup,
                 line_status_df=line_status_df,
                 kpis=kpis,
@@ -681,15 +718,13 @@ if MOD["workspace_root"] is not None:
         else:
             st.caption("No saved runs yet. Click **Save this run** to create your first run history entry.")
 
-    # ✅ If a run is loaded, override outputs (+ suppliers snapshot if present)
     if st.session_state.get("loaded_run"):
         loaded = MOD["load_run"](Path(st.session_state["loaded_run"]))
         exceptions = loaded.get("exceptions", exceptions)
 
-        # ✅ Load full snapshot
         followups_full = loaded.get("followups", followups_full)
 
-        # ✅ NEW: Re-derive OPEN followups using issue_tracker.json
+        # Re-derive OPEN followups from issue tracker store
         store = IssueTrackerStore()
         issue_map = store.load()
 
@@ -701,7 +736,6 @@ if MOD["workspace_root"] is not None:
             followups_open = followups_open[followups_open["_resolved_tmp"] == False].copy()
             followups_open = followups_open.drop(columns=["_resolved_tmp"], errors="ignore")
 
-        # ✅ Operational followups everywhere else should be open-only
         followups = followups_open
 
         order_rollup = loaded.get("order_rollup", order_rollup)
