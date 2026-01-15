@@ -268,6 +268,9 @@ BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# ✅ issue tracker persistence lives under data/ too
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 WORKSPACES_DIR = DATA_DIR / "workspaces"
 WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -547,15 +550,37 @@ if MOD["add_missing_supplier_contact_exceptions"] is not None:
 
 
 # ============================================================
-# SLA Escalations (✅ NEW CHANGE YOU ASKED FOR)
+# SLA Escalations + Issue Tracker (✅ UPDATED FOR NEW RETURN VALUES)
 # Place this AFTER followups exist and AFTER CRM enrichment
 # ============================================================
+followups_full = followups  # will keep the "full" version (with issue fields, resolved/notes)
+followups_open = followups  # operational list (unresolved only)
+
 if MOD["render_sla_escalations"] is not None:
-    followups = MOD["render_sla_escalations"](
-        line_status_df=line_status_df,
-        followups=followups,
-        promised_ship_days=int(default_promised_ship_days),
-    )
+    try:
+        escalations_df, followups_full, followups_open = MOD["render_sla_escalations"](
+            line_status_df=line_status_df,
+            followups=followups,
+            promised_ship_days=int(default_promised_ship_days),
+        )
+        # ✅ Downstream operational behavior should use open only
+        followups = followups_open
+    except TypeError:
+        # Backward compatibility if UI signature differs
+        out = MOD["render_sla_escalations"](
+            line_status_df=line_status_df,
+            followups=followups,
+            promised_ship_days=int(default_promised_ship_days),
+        )
+        # If old UI returns just a df, keep prior behavior
+        if isinstance(out, tuple) and len(out) >= 2:
+            followups_full = out[1]
+            followups = out[1]
+            followups_open = out[1]
+        else:
+            followups_full = out
+            followups = out
+            followups_open = out
 else:
     st.warning("SLA escalations UI not found. Create ui/sla_escalations_ui.py + core/sla_escalations.py to enable.")
 
@@ -588,7 +613,9 @@ if MOD["workspace_root"] is not None:
                 shipments=shipments,
                 tracking=tracking,
                 exceptions=exceptions,
-                followups=followups,
+                # ✅ Save the full followups snapshot (better history),
+                # but operational UI uses followups_open below.
+                followups=followups_full,
                 order_rollup=order_rollup,
                 line_status_df=line_status_df,
                 kpis=kpis,
@@ -646,7 +673,11 @@ if MOD["workspace_root"] is not None:
     if st.session_state.get("loaded_run"):
         loaded = MOD["load_run"](Path(st.session_state["loaded_run"]))
         exceptions = loaded.get("exceptions", exceptions)
-        followups = loaded.get("followups", followups)
+        # ✅ Load the saved snapshot (full), but re-derive open for operational
+        followups_full = loaded.get("followups", followups_full)
+        followups = followups_full
+        followups_open = followups_full  # fallback; open filtering is done inside SLA UI each run
+
         order_rollup = loaded.get("order_rollup", order_rollup)
         line_status_df = loaded.get("line_status_df", line_status_df)
 
@@ -685,7 +716,8 @@ if MOD["make_daily_ops_pack_bytes"] is not None:
         pack_name = f"daily_ops_pack_{pack_date}.zip"
         ops_pack_bytes = MOD["make_daily_ops_pack_bytes"](
             exceptions=exceptions if exceptions is not None else pd.DataFrame(),
-            followups=followups if followups is not None else pd.DataFrame(),
+            # ✅ Ops pack should use OPEN followups (unresolved)
+            followups=followups_open if followups_open is not None else (followups if followups is not None else pd.DataFrame()),
             order_rollup=order_rollup if order_rollup is not None else pd.DataFrame(),
             line_status_df=line_status_df if line_status_df is not None else pd.DataFrame(),
             kpis=kpis if isinstance(kpis, dict) else {},
@@ -725,7 +757,8 @@ k5.metric("% Late Unshipped", f"{(kpis or {}).get('pct_late_unshipped', 0)}%")
 # Feature: Daily Action List
 # ============================================================
 if MOD["build_daily_action_list"] is not None and MOD["render_daily_action_list"] is not None:
-    actions = MOD["build_daily_action_list"](exceptions=exceptions, followups=followups, max_items=10)
+    # ✅ Use OPEN followups (unresolved)
+    actions = MOD["build_daily_action_list"](exceptions=exceptions, followups=followups_open if followups_open is not None else followups, max_items=10)
     MOD["render_daily_action_list"](actions)
 
 
@@ -758,7 +791,8 @@ if MOD["render_customer_impact_view"] is not None:
     MOD["render_customer_impact_view"](customer_impact)
 
 if MOD["render_comms_pack_download"] is not None:
-    MOD["render_comms_pack_download"](followups=followups, customer_impact=customer_impact)
+    # ✅ Comms pack should use OPEN followups (unresolved)
+    MOD["render_comms_pack_download"](followups=followups_open if followups_open is not None else followups, customer_impact=customer_impact)
 
 
 # ============================================================
@@ -851,28 +885,41 @@ else:
 st.divider()
 st.subheader("Supplier Follow-ups (Copy/Paste Ready)")
 
-if followups is None or followups.empty:
+# ✅ Always prefer unresolved list if available
+followups_for_ops = followups_open if followups_open is not None else followups
+
+if followups_for_ops is None or followups_for_ops.empty:
     st.info("No follow-ups needed.")
 else:
-    summary_cols = [c for c in ["supplier_name", "supplier_email", "worst_escalation", "urgency", "item_count", "order_ids"] if c in followups.columns]
+    summary_cols = [c for c in ["supplier_name", "supplier_email", "worst_escalation", "urgency", "item_count", "order_ids"] if c in followups_for_ops.columns]
     if summary_cols:
-        st.dataframe(followups[summary_cols], use_container_width=True, height=220)
+        st.dataframe(followups_for_ops[summary_cols], use_container_width=True, height=220)
     else:
-        st.dataframe(followups, use_container_width=True, height=220)
+        st.dataframe(followups_for_ops, use_container_width=True, height=220)
 
-    st.download_button(
-        "Download Supplier Follow-ups CSV",
-        data=followups.to_csv(index=False).encode("utf-8"),
-        file_name="supplier_followups.csv",
-        mime="text/csv",
-    )
+    cdl1, cdl2 = st.columns(2)
+    with cdl1:
+        st.download_button(
+            "Download OPEN Follow-ups CSV (Unresolved)",
+            data=followups_for_ops.to_csv(index=False).encode("utf-8"),
+            file_name="supplier_followups_open.csv",
+            mime="text/csv",
+        )
+    with cdl2:
+        if followups_full is not None and not followups_full.empty:
+            st.download_button(
+                "Download FULL Follow-ups CSV (Includes resolved/notes)",
+                data=followups_full.to_csv(index=False).encode("utf-8"),
+                file_name="supplier_followups_full.csv",
+                mime="text/csv",
+            )
 
-    if MOD["copy_button"] is not None and "supplier_name" in followups.columns and "body" in followups.columns and len(followups) > 0:
+    if MOD["copy_button"] is not None and "supplier_name" in followups_for_ops.columns and "body" in followups_for_ops.columns and len(followups_for_ops) > 0:
         st.divider()
         st.markdown("### Email preview (select a supplier)")
 
-        chosen = st.selectbox("Supplier", followups["supplier_name"].tolist(), key="supplier_email_preview_select")
-        row = followups[followups["supplier_name"] == chosen].iloc[0]
+        chosen = st.selectbox("Supplier", followups_for_ops["supplier_name"].tolist(), key="supplier_email_preview_select")
+        row = followups_for_ops[followups_for_ops["supplier_name"] == chosen].iloc[0]
 
         supplier_email = row.get("supplier_email", "")
         subject = row.get("subject", "Action required: outstanding shipments")
