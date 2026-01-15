@@ -21,6 +21,32 @@ import streamlit.components.v1 as components
 PUBLIC_REVIEW_MODE = False
 
 
+# -------------------------------
+# Key de-dup (prevents StreamlitDuplicateElementKey)
+# -------------------------------
+def _reset_run_widget_keys():
+    # Reset every rerun so keys don't grow forever
+    st.session_state["_run_widget_keys_used"] = set()
+
+
+def _k(base: str) -> str:
+    """
+    Returns a unique widget key for the current rerun.
+    If the same base key is requested twice in one run, we suffix it.
+    This prevents StreamlitDuplicateElementKey crashes without removing features.
+    """
+    used = st.session_state.setdefault("_run_widget_keys_used", set())
+    if base not in used:
+        used.add(base)
+        return base
+    i = 2
+    while f"{base}__{i}" in used:
+        i += 1
+    new_key = f"{base}__{i}"
+    used.add(new_key)
+    return new_key
+
+
 # ============================================================
 # Optional feature imports (do NOT crash if missing)
 # ============================================================
@@ -51,7 +77,6 @@ except Exception:
     render_sla_escalations = None
 
 try:
-    # Your current core/issue_tracker.py may NOT have CONTACT_STATUSES yet.
     from core.issue_tracker import IssueTrackerStore, CONTACT_STATUSES  # type: ignore
 except Exception:
     IssueTrackerStore = None
@@ -294,10 +319,7 @@ def get_allowed_emails() -> list[str]:
 
 
 def require_email_access_gate():
-    """
-    IMPORTANT: This gate must render only once.
-    This session flag prevents accidental duplicate rendering if some code path calls it twice.
-    """
+    # Prevent accidental double-render from other code paths
     if st.session_state.get("_email_gate_ran", False):
         return
     st.session_state["_email_gate_ran"] = True
@@ -307,7 +329,9 @@ def require_email_access_gate():
         return
 
     st.subheader("Access")
-    email = st.text_input("Work email", key="auth_work_email").strip().lower()
+    email = st.text_input("Work email", key=_k("auth_work_email")).strip().lower()
+    st.session_state["auth_work_email"] = email
+
     allowed = get_allowed_emails()
 
     if allowed:
@@ -777,108 +801,24 @@ def _reset_demo_tables(data_dir: Path):
     st.session_state["demo_raw_tracking"] = pd.read_csv(data_dir / "raw_tracking.csv")
 
 
-# -------------------------------
-# Contact tracking helpers (works even if core.issue_tracker has NOT been upgraded)
-# -------------------------------
-def _ensure_contact_struct(rec: dict) -> dict:
-    if not isinstance(rec, dict):
-        rec = {}
-    c = rec.get("contact", {})
-    if not isinstance(c, dict):
-        c = {}
-    # defaults
-    c.setdefault("status", "Not Contacted")
-    c.setdefault("channel", "")
-    c.setdefault("last_contacted_at", "")
-    c.setdefault("follow_up_count", 0)
-    c.setdefault("notes", "")
-    rec["contact"] = c
-    return rec
-
-
-def _issue_get_contact(store, issue_id: str) -> dict:
-    data = store.load()
-    rec = data.get(str(issue_id), {}) if isinstance(data.get(str(issue_id), {}), dict) else {}
-    rec = _ensure_contact_struct(rec)
-    return rec.get("contact", {})
-
-
-def _issue_set_contact(store, issue_id: str, contact_patch: dict, append_note: str | None = None) -> None:
-    issue_id = str(issue_id or "").strip()
-    if not issue_id:
-        return
-    data = store.load()
-    rec = data.get(issue_id, {}) if isinstance(data.get(issue_id, {}), dict) else {}
-    rec = _ensure_contact_struct(rec)
-
-    c = rec.get("contact", {})
-    if not isinstance(c, dict):
-        c = {}
-    for k, v in (contact_patch or {}).items():
-        c[k] = v
-
-    if append_note:
-        prev = str(c.get("notes", "") or "")
-        stamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-        line = f"[{stamp}] {append_note}".strip()
-        c["notes"] = (prev + ("\n" if prev else "") + line).strip()
-
-    rec["contact"] = c
-    data[issue_id] = rec
-    store.save(data)
-
-
-def _mark_contacted(store, issue_id: str, channel: str = "email", note: str = "", new_status: str = "Contacted"):
-    patch = {
-        "status": new_status,
-        "channel": channel,
-        "last_contacted_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-    }
-    _issue_set_contact(store, issue_id, patch, append_note=note or "Marked contacted")
-
-
-def _increment_followup(store, issue_id: str, channel: str = "email", note: str = "Follow-up sent"):
-    c = _issue_get_contact(store, issue_id)
-    try:
-        n = int(c.get("follow_up_count", 0) or 0) + 1
-    except Exception:
-        n = 1
-    patch = {
-        "follow_up_count": n,
-        "channel": channel,
-        "last_contacted_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        "status": c.get("status", "Contacted") or "Contacted",
-    }
-    _issue_set_contact(store, issue_id, patch, append_note=note)
-
-
-def _set_contact_status(store, issue_id: str, status: str):
-    patch = {"status": status}
-    _issue_set_contact(store, issue_id, patch, append_note=f"Status set to {status}")
-
-
 # ============================================================
 # Page setup
 # ============================================================
 st.set_page_config(page_title="Dropship Hub", layout="wide")
+_reset_run_widget_keys()
 
 # -------------------------------
-# Early access code gate (ONLY once)
+# Early access code gate (ONE place only)
 # -------------------------------
 ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
 if not PUBLIC_REVIEW_MODE:
-    # Prevent accidental duplicate rendering
-    if not st.session_state.get("_access_gate_ran", False):
-        st.session_state["_access_gate_ran"] = True
-        code = st.text_input("Enter early access code", type="password", key="auth_access_code")
-        if code != ACCESS_CODE:
-            st.info("This app is currently in early access. Enter your code to continue.")
-            st.stop()
-    else:
-        # If some other path tried to render again, do nothing
-        pass
+    code = st.text_input("Enter early access code", type="password", key=_k("auth_access_code"))
+    st.session_state["auth_access_code"] = code
+    if code != ACCESS_CODE:
+        st.info("This app is currently in early access. Enter your code to continue.")
+        st.stop()
 
-# Email allowlist gate (ONLY once; guarded inside function)
+# Email allowlist gate (ONE place only)
 require_email_access_gate()
 
 
@@ -911,60 +851,54 @@ with st.sidebar:
         "Current plan",
         ["Early Access (Free)", "Pro", "Team"],
         index=0,
-        key="sidebar_plan",
+        key=_k("sidebar_plan"),
     )
 
     st.divider()
     st.header("Tenant")
-    account_id = st.text_input("account_id", value="demo_account", key="tenant_account_id")
-    store_id = st.text_input("store_id", value="demo_store", key="tenant_store_id")
+    account_id = st.text_input("account_id", value="demo_account", key=_k("tenant_account_id"))
+    store_id = st.text_input("store_id", value="demo_store", key=_k("tenant_store_id"))
     platform_hint = st.selectbox(
         "platform hint",
         ["shopify", "amazon", "etsy", "other"],
         index=0,
-        key="tenant_platform_hint",
+        key=_k("tenant_platform_hint"),
     )
 
     st.divider()
     st.header("Defaults")
-    default_currency = st.text_input("Default currency", value="USD", key="defaults_currency")
+    default_currency = st.text_input("Default currency", value="USD", key=_k("defaults_currency"))
     default_promised_ship_days = st.number_input(
         "Default promised ship days (SLA)",
         min_value=1,
         max_value=30,
         value=3,
-        key="defaults_sla_days",
+        key=_k("defaults_sla_days"),
     )
 
     st.divider()
     st.header("Demo Mode (Sticky)")
 
-    # IMPORTANT: prevent DuplicateElementKey for demo_mode if another file/page also creates it.
-    # We create the widget only once per session run; otherwise we just read the state.
-    if "_demo_toggle_drawn" not in st.session_state:
-        st.session_state["_demo_toggle_drawn"] = False
-
-    if not st.session_state["_demo_toggle_drawn"]:
-        demo_mode = st.toggle(
-            "Use demo data (sticky)",
-            key="demo_mode",
-            help="Keeps demo data and your edits across interactions until you reset or turn off demo mode.",
-        )
-        st.session_state["_demo_toggle_drawn"] = True
-    else:
-        demo_mode = st.session_state.get("demo_mode", False)
+    # Use unique key per run to prevent crashes if a second demo toggle exists somewhere else
+    demo_mode = st.toggle(
+        "Use demo data (sticky)",
+        key=_k("demo_mode"),
+        help="Keeps demo data and your edits across interactions until you reset or turn off demo mode.",
+    )
+    # Keep canonical value
+    st.session_state["demo_mode"] = bool(demo_mode)
 
     _init_demo_tables_if_needed(DATA_DIR)
 
     if demo_mode:
         cdm1, cdm2 = st.columns(2)
         with cdm1:
-            if st.button("Reset demo", use_container_width=True, key="btn_demo_reset"):
+            if st.button("Reset demo", use_container_width=True, key=_k("btn_demo_reset")):
                 _reset_demo_tables(DATA_DIR)
                 st.success("Demo reset ✅")
                 st.rerun()
         with cdm2:
-            if st.button("Clear demo", use_container_width=True, key="btn_demo_clear"):
+            if st.button("Clear demo", use_container_width=True, key=_k("btn_demo_clear")):
                 st.session_state["demo_mode"] = False
                 _init_demo_tables_if_needed(DATA_DIR)
                 st.rerun()
@@ -979,18 +913,18 @@ with st.sidebar:
                 max_value=365,
                 value=30,
                 step=1,
-                key="issue_prune_days",
+                key=_k("issue_prune_days"),
             )
             cmt1, cmt2 = st.columns(2)
             with cmt1:
-                if st.button("🧹 Prune old resolved", use_container_width=True, key="btn_issue_prune"):
+                if st.button("🧹 Prune old resolved", use_container_width=True, key=_k("btn_issue_prune")):
                     ws_root_for_store = workspace_root(WORKSPACES_DIR, account_id, store_id)
                     store = IssueTrackerStore(Path(ws_root_for_store) / "issue_tracker.json")
                     removed = store.prune_resolved_older_than_days(int(prune_days))
                     st.success(f"Pruned {removed} resolved item(s).")
                     st.rerun()
             with cmt2:
-                if st.button("🗑️ Clear ALL resolved", use_container_width=True, key="btn_issue_clear"):
+                if st.button("🗑️ Clear ALL resolved", use_container_width=True, key=_k("btn_issue_clear")):
                     ws_root_for_store = workspace_root(WORKSPACES_DIR, account_id, store_id)
                     store = IssueTrackerStore(Path(ws_root_for_store) / "issue_tracker.json")
                     removed = store.clear_resolved()
@@ -1002,7 +936,7 @@ with st.sidebar:
     if "suppliers_df" not in st.session_state:
         st.session_state["suppliers_df"] = load_suppliers(SUPPLIERS_DIR, account_id, store_id)
 
-    f_suppliers = st.file_uploader("Upload suppliers.csv", type=["csv"], key="suppliers_uploader")
+    f_suppliers = st.file_uploader("Upload suppliers.csv", type=["csv"], key=_k("suppliers_uploader"))
     if f_suppliers is not None:
         uploaded_suppliers = pd.read_csv(f_suppliers)
         st.session_state["suppliers_df"] = uploaded_suppliers
@@ -1089,7 +1023,7 @@ if st.session_state.get("demo_mode", False):
                 use_container_width=True,
                 height=280,
                 num_rows="dynamic",
-                key="demo_orders_editor",
+                key=_k("demo_orders_editor"),
             )
         with e2:
             st.caption("raw_shipments.csv (demo)")
@@ -1098,7 +1032,7 @@ if st.session_state.get("demo_mode", False):
                 use_container_width=True,
                 height=280,
                 num_rows="dynamic",
-                key="demo_shipments_editor",
+                key=_k("demo_shipments_editor"),
             )
         with e3:
             st.caption("raw_tracking.csv (demo)")
@@ -1107,7 +1041,7 @@ if st.session_state.get("demo_mode", False):
                 use_container_width=True,
                 height=280,
                 num_rows="dynamic",
-                key="demo_tracking_editor",
+                key=_k("demo_tracking_editor"),
             )
 else:
     st.info("Turn on **Demo Mode (Sticky)** in the sidebar to play with demo data (edits persist).")
@@ -1120,11 +1054,11 @@ st.divider()
 st.subheader("Upload your data")
 col1, col2, col3 = st.columns(3)
 with col1:
-    f_orders = st.file_uploader("Orders CSV (Shopify export or generic)", type=["csv"], key="uploader_orders")
+    f_orders = st.file_uploader("Orders CSV (Shopify export or generic)", type=["csv"], key=_k("uploader_orders"))
 with col2:
-    f_shipments = st.file_uploader("Shipments CSV (supplier export)", type=["csv"], key="uploader_shipments")
+    f_shipments = st.file_uploader("Shipments CSV (supplier export)", type=["csv"], key=_k("uploader_shipments"))
 with col3:
-    f_tracking = st.file_uploader("Tracking CSV (optional)", type=["csv"], key="uploader_tracking")
+    f_tracking = st.file_uploader("Tracking CSV (optional)", type=["csv"], key=_k("uploader_tracking"))
 
 
 # -------------------------------
@@ -1147,7 +1081,7 @@ with t1:
         data=shipments_template.to_csv(index=False).encode("utf-8"),
         file_name="shipments_template.csv",
         mime="text/csv",
-        key="dl_shipments_template",
+        key=_k("dl_shipments_template"),
     )
 with t2:
     st.download_button(
@@ -1155,7 +1089,7 @@ with t2:
         data=tracking_template.to_csv(index=False).encode("utf-8"),
         file_name="tracking_template.csv",
         mime="text/csv",
-        key="dl_tracking_template",
+        key=_k("dl_tracking_template"),
     )
 with t3:
     st.download_button(
@@ -1163,7 +1097,7 @@ with t3:
         data=suppliers_template.to_csv(index=False).encode("utf-8"),
         file_name="suppliers_template.csv",
         mime="text/csv",
-        key="dl_suppliers_template",
+        key=_k("dl_suppliers_template"),
     )
 
 
@@ -1288,9 +1222,6 @@ followups = followups_open
 # -------------------------------
 # Workspaces UI (sidebar)
 # -------------------------------
-if IssueTrackerStore is not None:
-    st.caption(f"Issue tracker file: `{ISSUE_TRACKER_PATH.as_posix()}`")
-
 if "loaded_run" not in st.session_state:
     st.session_state["loaded_run"] = None
 
@@ -1298,9 +1229,9 @@ with st.sidebar:
     st.divider()
     st.header("Workspaces")
 
-    workspace_name = st.text_input("Workspace name", value="default", key="ws_name")
+    workspace_name = st.text_input("Workspace name", value="default", key=_k("ws_name"))
 
-    if st.button("💾 Save this run", key="btn_save_run"):
+    if st.button("💾 Save this run", key=_k("btn_save_run")):
         run_dir = save_run(
             ws_root=ws_root,
             workspace_name=workspace_name,
@@ -1330,12 +1261,12 @@ with st.sidebar:
             "Load previous run",
             options=list(range(len(runs))),
             format_func=lambda i: run_labels[i],
-            key="ws_load_select",
+            key=_k("ws_load_select"),
         )
 
         cL1, cL2 = st.columns(2)
         with cL1:
-            if st.button("📂 Load", key="btn_load_run"):
+            if st.button("📂 Load", key=_k("btn_load_run")):
                 st.session_state["loaded_run"] = str(runs[chosen_idx]["path"])
                 st.success("Loaded ✅")
         with cL2:
@@ -1347,7 +1278,7 @@ with st.sidebar:
                     data=zip_bytes,
                     file_name=f"runpack_{run_dir.parent.name}_{run_dir.name}.zip",
                     mime="application/zip",
-                    key="btn_zip_runpack",
+                    key=_k("btn_zip_runpack"),
                 )
 
         with st.expander("Run history", expanded=False):
@@ -1360,10 +1291,10 @@ with st.sidebar:
                 "Select run to delete",
                 options=list(range(len(runs))),
                 format_func=lambda i: f"{runs[i]['workspace_name']} / {runs[i]['run_id']}",
-                key="ws_delete_select",
+                key=_k("ws_delete_select"),
             )
-            confirm = st.checkbox("I understand this cannot be undone", key="ws_delete_confirm")
-            if st.button("🗑️ Delete run", disabled=not confirm, key="btn_delete_run"):
+            confirm = st.checkbox("I understand this cannot be undone", key=_k("ws_delete_confirm"))
+            if st.button("🗑️ Delete run", disabled=not confirm, key=_k("btn_delete_run")):
                 target = Path(runs[delete_idx]["path"])
                 loaded_path = st.session_state.get("loaded_run")
                 delete_run_dir(target)
@@ -1449,7 +1380,7 @@ with st.sidebar:
         file_name=pack_name,
         mime="application/zip",
         use_container_width=True,
-        key="btn_daily_ops_pack_sidebar",
+        key=_k("btn_daily_ops_pack_sidebar"),
     )
 
 
@@ -1503,13 +1434,13 @@ else:
 
     f1, f2, f3, f4 = st.columns(4)
     with f1:
-        st.button("All", on_click=set_triage, args=("All",), use_container_width=True, key="triage_btn_all")
+        st.button("All", on_click=set_triage, args=("All",), use_container_width=True, key=_k("triage_btn_all"))
     with f2:
-        st.button("Critical + High", on_click=set_triage, args=("CriticalHigh",), use_container_width=True, key="triage_btn_crit_high")
+        st.button("Critical + High", on_click=set_triage, args=("CriticalHigh",), use_container_width=True, key=_k("triage_btn_crit_high"))
     with f3:
-        st.button("Missing tracking", on_click=set_triage, args=("MissingTracking",), use_container_width=True, key="triage_btn_missing_tracking")
+        st.button("Missing tracking", on_click=set_triage, args=("MissingTracking",), use_container_width=True, key=_k("triage_btn_missing_tracking"))
     with f4:
-        st.button("Late unshipped", on_click=set_triage, args=("LateUnshipped",), use_container_width=True, key="triage_btn_late_unshipped")
+        st.button("Late unshipped", on_click=set_triage, args=("LateUnshipped",), use_container_width=True, key=_k("triage_btn_late_unshipped"))
 
     triage = exceptions.copy()
     mode = st.session_state["triage_filter"]
@@ -1540,7 +1471,7 @@ else:
         triage = triage.sort_values(sort_cols, ascending=True)
 
     st.dataframe(style_exceptions_table(triage[show_cols].head(10)), use_container_width=True, height=320)
-    st.download_button("⬇️ Download Daily Ops Pack ZIP", data=ops_pack_bytes, file_name=pack_name, mime="application/zip", key="dl_ops_pack_main")
+    st.download_button("⬇️ Download Daily Ops Pack ZIP", data=ops_pack_bytes, file_name=pack_name, mime="application/zip", key=_k("dl_ops_pack_main"))
 
 
 # ============================================================
@@ -1586,7 +1517,7 @@ with tab1:
 
         # Supplier email preview + 3 bullet questions generator
         if "supplier_name" in followups_for_ops.columns and len(followups_for_ops) > 0:
-            chosen = st.selectbox("Supplier", followups_for_ops["supplier_name"].tolist(), key="supplier_email_preview_select")
+            chosen = st.selectbox("Supplier", followups_for_ops["supplier_name"].tolist(), key=_k("supplier_email_preview_select"))
             row = followups_for_ops[followups_for_ops["supplier_name"] == chosen].iloc[0]
 
             supplier_email = str(row.get("supplier_email", "")).strip()
@@ -1597,7 +1528,7 @@ with tab1:
                 default_subject = f"Urgent: shipment status update needed ({chosen})"
 
             st.markdown("#### Supplier Email Generator (3 questions)")
-            subj = st.text_input("Subject", value=default_subject, key="supplier_email_subject")
+            subj = st.text_input("Subject", value=default_subject, key=_k("supplier_email_subject"))
 
             bullets = [
                 "Can you confirm what’s causing the delay / issue on these shipments?",
@@ -1619,7 +1550,7 @@ with tab1:
                     "Thanks,",
                 ]
             )
-            body = st.text_area("Body", value=body_default, height=240, key="supplier_email_body")
+            body = st.text_area("Body", value=body_default, height=240, key=_k("supplier_email_body"))
 
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -1634,13 +1565,13 @@ with tab1:
                 data=(f"To: {supplier_email}\nSubject: {subj}\n\n{body}").encode("utf-8"),
                 file_name=f"supplier_email_{str(chosen)}".replace(" ", "_").lower() + ".txt",
                 mime="text/plain",
-                key="btn_download_supplier_email_txt",
+                key=_k("btn_download_supplier_email_txt"),
             )
 
             # -------------------------------
-            # One-click compose + Follow-up tracking (works with current IssueTrackerStore)
+            # One-click compose + Follow-up tracking (if core supports it)
             # -------------------------------
-            if IssueTrackerStore is not None:
+            if IssueTrackerStore is not None and mailto_link is not None and hasattr(IssueTrackerStore, "mark_contacted"):
                 store = IssueTrackerStore(ISSUE_TRACKER_PATH)
 
                 issue_ids = []
@@ -1652,29 +1583,20 @@ with tab1:
                         .tolist()
                     )
 
-                compose_url = None
-                if mailto_link is not None:
-                    try:
-                        compose_url = mailto_link(supplier_email, subj, body)
-                    except Exception:
-                        compose_url = None
+                compose_url = mailto_link(supplier_email, subj, body)
 
                 ccA, ccB, ccC = st.columns(3)
                 with ccA:
-                    if compose_url:
-                        try:
-                            st.link_button("📧 One-click compose email", compose_url, use_container_width=True)
-                        except Exception:
-                            st.markdown(f"[📧 One-click compose email]({compose_url})")
-                        st.caption("Opens your email app with To/Subject/Body filled")
-                    else:
-                        st.caption("One-click compose not available (core/email_utils.py missing).")
+                    try:
+                        st.link_button("📧 One-click compose email", compose_url, use_container_width=True)
+                    except Exception:
+                        st.markdown(f"[📧 One-click compose email]({compose_url})")
+                    st.caption("Opens your email app with To/Subject/Body filled")
 
                 with ccB:
-                    if st.button("✅ Mark contacted", key=f"btn_mark_contacted_{chosen}"):
+                    if st.button("✅ Mark contacted", key=_k(f"btn_mark_contacted_{chosen}")):
                         for iid in issue_ids:
-                            _mark_contacted(
-                                store,
+                            store.mark_contacted(
                                 iid,
                                 channel="email",
                                 note=f"Supplier email composed/sent to {supplier_email}",
@@ -1684,25 +1606,26 @@ with tab1:
                         st.rerun()
 
                 with ccC:
-                    if st.button("🔁 Follow-up +1", key=f"btn_followup_plus1_{chosen}"):
+                    if hasattr(store, "increment_followup") and st.button("🔁 Follow-up +1", key=_k(f"btn_followup_plus1_{chosen}")):
                         for iid in issue_ids:
-                            _increment_followup(store, iid, channel="email", note="Follow-up sent")
+                            store.increment_followup(iid, channel="email", note="Follow-up sent")
                         st.success(f"Recorded follow-up for {len(issue_ids)} issue(s).")
                         st.rerun()
 
-                new_status = st.selectbox(
-                    "Set supplier issue status",
-                    CONTACT_STATUSES,
-                    index=CONTACT_STATUSES.index("Waiting") if "Waiting" in CONTACT_STATUSES else 0,
-                    key=f"status_bulk_{chosen}",
-                )
-                if st.button("Save status for all supplier issues", key=f"btn_status_bulk_{chosen}"):
-                    for iid in issue_ids:
-                        _set_contact_status(store, iid, new_status)
-                    st.success(f"Set status to {new_status} for {len(issue_ids)} issue(s).")
-                    st.rerun()
+                if hasattr(store, "set_contact_status"):
+                    new_status = st.selectbox(
+                        "Set supplier issue status",
+                        CONTACT_STATUSES,
+                        index=CONTACT_STATUSES.index("Waiting") if "Waiting" in CONTACT_STATUSES else 0,
+                        key=_k(f"status_bulk_{chosen}"),
+                    )
+                    if st.button("Save status for all supplier issues", key=_k(f"btn_status_bulk_{chosen}")):
+                        for iid in issue_ids:
+                            store.set_contact_status(iid, new_status)
+                        st.success(f"Set status to {new_status} for {len(issue_ids)} issue(s).")
+                        st.rerun()
 
-        # ✅ Supplier accountability: correct signature build_supplier_accountability_view(scorecard, top_n=10)
+        # ✅ Supplier accountability
         if build_supplier_accountability_view is not None and render_supplier_accountability is not None:
             st.divider()
             st.markdown("#### Supplier Accountability (Auto)")
@@ -1713,7 +1636,6 @@ with tab1:
                 if "scorecard" in params:
                     accountability = build_supplier_accountability_view(scorecard=scorecard, top_n=10)
                 else:
-                    # positional fallback
                     if len(params) >= 2:
                         accountability = build_supplier_accountability_view(scorecard, 10)
                     else:
@@ -1735,7 +1657,6 @@ with tab2:
     else:
         if render_customer_comms_ui is not None:
             try:
-                # ✅ more resilient call (handles ws_root/account/store variants)
                 call_with_accepted_kwargs(
                     render_customer_comms_ui,
                     customer_impact=customer_impact,
@@ -1749,7 +1670,6 @@ with tab2:
                 except Exception:
                     render_customer_comms_ui(customer_impact)
         else:
-            # Compact fallback generator
             cols = customer_impact.columns.tolist()
             order_col = "order_id" if "order_id" in cols else ("order" if "order" in cols else None)
             email_col = "customer_email" if "customer_email" in cols else ("email" if "email" in cols else None)
@@ -1757,7 +1677,7 @@ with tab2:
 
             if order_col:
                 opts = customer_impact[order_col].fillna("").astype(str).tolist()
-                chosen_order = st.selectbox("Select order", opts, key="cust_email_order_select")
+                chosen_order = st.selectbox("Select order", opts, key=_k("cust_email_order_select"))
                 crow = customer_impact[customer_impact[order_col].astype(str) == str(chosen_order)].iloc[0]
             else:
                 chosen_order = "(customer item)"
@@ -1767,7 +1687,7 @@ with tab2:
             reason = str(crow.get(reason_col, "")).strip() if reason_col else ""
 
             subj_default = f"Update on your order {chosen_order}".strip()
-            c_subject = st.text_input("Subject", value=subj_default, key="cust_email_subject")
+            c_subject = st.text_input("Subject", value=subj_default, key=_k("cust_email_subject"))
 
             body_lines = [
                 "Hi there,",
@@ -1787,7 +1707,7 @@ with tab2:
                 "",
                 "Best,",
             ]
-            c_body = st.text_area("Body", value="\n".join(body_lines), height=240, key="cust_email_body")
+            c_body = st.text_area("Body", value="\n".join(body_lines), height=240, key=_k("cust_email_body"))
 
             cc1, cc2, cc3 = st.columns(3)
             with cc1:
@@ -1831,19 +1751,19 @@ else:
 
     with fcol1:
         issue_types = sorted(exceptions["issue_type"].dropna().unique().tolist()) if "issue_type" in exceptions.columns else []
-        issue_filter = st.multiselect("Issue types", issue_types, default=issue_types, key="exq_issue_types")
+        issue_filter = st.multiselect("Issue types", issue_types, default=issue_types, key=_k("exq_issue_types"))
 
     with fcol2:
         countries = sorted([c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist() if str(c).strip() != ""])
-        country_filter = st.multiselect("Customer country", countries, default=countries, key="exq_countries")
+        country_filter = st.multiselect("Customer country", countries, default=countries, key=_k("exq_countries"))
 
     with fcol3:
         suppliers = sorted([s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist() if str(s).strip() != ""])
-        supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers, key="exq_suppliers")
+        supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers, key=_k("exq_suppliers"))
 
     with fcol4:
         urgencies = ["Critical", "High", "Medium", "Low"]
-        urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies, key="exq_urgency")
+        urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies, key=_k("exq_urgency"))
 
     filtered = exceptions.copy()
     if issue_filter and "issue_type" in filtered.columns:
@@ -1868,7 +1788,7 @@ else:
         data=filtered.to_csv(index=False).encode("utf-8"),
         file_name="exceptions_queue.csv",
         mime="text/csv",
-        key="dl_exceptions_csv",
+        key=_k("dl_exceptions_csv"),
     )
 
 
@@ -1883,9 +1803,9 @@ if scorecard is None or scorecard.empty:
 else:
     sc1, sc2 = st.columns(2)
     with sc1:
-        top_n = st.slider("Show top N suppliers", min_value=5, max_value=50, value=15, step=5, key="scorecard_top_n")
+        top_n = st.slider("Show top N suppliers", min_value=5, max_value=50, value=15, step=5, key=_k("scorecard_top_n"))
     with sc2:
-        min_lines = st.number_input("Min total lines", min_value=1, max_value=1000000, value=1, step=1, key="scorecard_min_lines")
+        min_lines = st.number_input("Min total lines", min_value=1, max_value=1000000, value=1, step=1, key=_k("scorecard_min_lines"))
 
     view = scorecard[scorecard["total_lines"] >= int(min_lines)].head(int(top_n))
 
@@ -1898,7 +1818,7 @@ else:
         data=scorecard.to_csv(index=False).encode("utf-8"),
         file_name="supplier_scorecards.csv",
         mime="text/csv",
-        key="dl_scorecards_csv",
+        key=_k("dl_scorecards_csv"),
     )
 
     with st.expander("Trend over time (from saved runs)", expanded=True):
@@ -1906,14 +1826,14 @@ else:
         if not runs_for_trend:
             st.caption("No saved runs yet. Click **Save this run** to build trend history.")
         else:
-            max_runs = st.slider("Use last N saved runs", 5, 50, 25, 5, key="trend_max_runs")
+            max_runs = st.slider("Use last N saved runs", 5, 50, 25, 5, key=_k("trend_max_runs"))
             hist = load_recent_scorecard_history(str(ws_root), max_runs=int(max_runs))
 
             if hist is None or hist.empty:
                 st.caption("No historical scorecards found yet (save a run first).")
             else:
                 supplier_options = sorted(hist["supplier_name"].dropna().unique().tolist())
-                chosen_supplier = st.selectbox("Supplier", supplier_options, key="scorecard_trend_supplier")
+                chosen_supplier = st.selectbox("Supplier", supplier_options, key=_k("scorecard_trend_supplier"))
 
                 s_hist = hist[hist["supplier_name"] == chosen_supplier].copy().sort_values("run_dt")
                 chart_df = s_hist[["run_dt", "exception_rate"]].dropna()
