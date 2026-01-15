@@ -1,73 +1,108 @@
-# ui/customer_comms_ui.py
+# ui/issue_tracker_ui.py
 from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
 
+from core.issue_tracker import IssueTrackerStore
 
-def render_customer_email_generator(
-    customer_emails: pd.DataFrame,
-    copy_button=None,
-):
-    st.divider()
-    st.subheader("Auto Customer Emails (Copy/Paste Ready)")
 
-    if customer_emails is None or customer_emails.empty:
-        st.info("No customer emails generated (no customer-impact exceptions detected).")
-        return
+def render_issue_tracker_panel(
+    followups_full: pd.DataFrame,
+    title: str = "Issue Tracker (Resolved + Notes)",
+) -> pd.DataFrame:
+    """
+    Renders a resolved/notes editor and returns followups_full enriched with:
+      - resolved (bool)
+      - notes (str)
 
-    cols = [c for c in ["order_id", "customer_email", "template_type", "customer_risk"] if c in customer_emails.columns]
-    st.dataframe(customer_emails[cols] if cols else customer_emails, use_container_width=True, height=240)
+    Requirements:
+      - followups_full must contain 'issue_id' column
+    """
 
-    st.download_button(
-        "Download Customer Emails CSV",
-        data=customer_emails.to_csv(index=False).encode("utf-8"),
-        file_name="customer_emails.csv",
-        mime="text/csv",
-        key="btn_download_customer_emails_csv",
-    )
+    if followups_full is None or followups_full.empty:
+        st.subheader(title)
+        st.caption("No follow-ups to track.")
+        return followups_full
 
-    if "order_id" not in customer_emails.columns or "body" not in customer_emails.columns:
-        return
+    if "issue_id" not in followups_full.columns:
+        st.subheader(title)
+        st.warning("Issue Tracker requires `issue_id` in followups_full.")
+        return followups_full
 
-    st.divider()
-    st.markdown("### Customer email preview (select an order)")
+    store = IssueTrackerStore()
+    issue_map = store.load() or {}
 
-    options = customer_emails["order_id"].dropna().astype(str).tolist()
-    chosen = st.selectbox("Order", options, key="customer_email_preview_select")
-    row = customer_emails[customer_emails["order_id"].astype(str) == str(chosen)].iloc[0]
+    df = followups_full.copy()
+    df["issue_id"] = df["issue_id"].astype(str)
 
-    to_email = str(row.get("customer_email", "")).strip()
-    subject = str(row.get("subject", "Update on your order")).strip()
-    body = str(row.get("body", "")).strip()
+    df["resolved"] = df["issue_id"].map(lambda k: bool((issue_map.get(str(k), {}) or {}).get("resolved", False)))
+    df["notes"] = df["issue_id"].map(lambda k: str((issue_map.get(str(k), {}) or {}).get("notes", "")))
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if copy_button:
-            copy_button(to_email, "Copy customer email", key=f"copy_customer_to_{chosen}")
-        else:
-            st.text_input("To", value=to_email, key=f"fallback_customer_to_{chosen}")
+    resolved_count = int(df["resolved"].sum())
+    open_count = int(len(df) - resolved_count)
 
-    with c2:
-        if copy_button:
-            copy_button(subject, "Copy subject", key=f"copy_customer_subject_{chosen}")
-        else:
-            st.text_input("Subject", value=subject, key=f"fallback_customer_subject_{chosen}")
+    st.subheader(title)
+    a, b, c = st.columns(3)
+    a.metric("Open", open_count)
+    b.metric("Resolved", resolved_count)
+    c.metric("Total", int(len(df)))
 
-    with c3:
-        if copy_button:
-            copy_button(body, "Copy body", key=f"copy_customer_body_{chosen}")
-        else:
-            st.text_area("Body", value=body, height=160, key=f"fallback_customer_body_{chosen}")
+    with st.expander("Update resolved status + notes", expanded=False):
+        cols_pref = [
+            "issue_id",
+            "supplier_name",
+            "supplier_email",
+            "order_ids",
+            "item_count",
+            "worst_escalation",
+            "urgency",
+            "resolved",
+            "notes",
+        ]
+        cols_show = [c for c in cols_pref if c in df.columns]
+        work = df[cols_show].copy()
 
-    st.text_input("To (customer email)", value=to_email, key="customer_to_preview")
-    st.text_input("Subject", value=subject, key="customer_subject_preview")
-    st.text_area("Body", value=body, height=260, key="customer_body_preview")
+        # Keep editor stable
+        work = work.sort_values(["resolved", "supplier_name"] if "supplier_name" in work.columns else ["resolved"])
 
-    st.download_button(
-        "Download this email as .txt",
-        data=(f"To: {to_email}\nSubject: {subject}\n\n{body}").encode("utf-8"),
-        file_name=f"customer_email_order_{chosen}.txt".replace(" ", "_").lower(),
-        mime="text/plain",
-        key="btn_download_customer_email_txt",
-    )
+        edited = st.data_editor(
+            work,
+            use_container_width=True,
+            height=320,
+            num_rows="fixed",
+            key="issue_tracker_editor",
+            column_config={
+                "resolved": st.column_config.CheckboxColumn("resolved"),
+                "notes": st.column_config.TextColumn("notes"),
+            },
+        )
+
+        save1, save2 = st.columns([1, 3])
+        with save1:
+            if st.button("💾 Save changes", use_container_width=True, key="btn_issue_tracker_save"):
+                try:
+                    for _, r in edited.iterrows():
+                        iid = str(r.get("issue_id", "")).strip()
+                        if not iid:
+                            continue
+                        store.upsert(
+                            issue_id=iid,
+                            resolved=bool(r.get("resolved", False)),
+                            notes=str(r.get("notes", "") or ""),
+                        )
+                    st.success("Saved ✅")
+                    st.rerun()
+                except Exception as e:
+                    st.error("Failed to save issue tracker updates.")
+                    st.code(str(e))
+
+        with save2:
+            st.caption("Tip: Use this to hide resolved items from OPEN follow-ups while keeping history.")
+
+    # Merge the latest resolved/notes back into full df
+    # (In case user edited in the same render pass)
+    latest_map = store.load() or {}
+    df["resolved"] = df["issue_id"].map(lambda k: bool((latest_map.get(str(k), {}) or {}).get("resolved", False)))
+    df["notes"] = df["issue_id"].map(lambda k: str((latest_map.get(str(k), {}) or {}).get("notes", "")))
+    return df
