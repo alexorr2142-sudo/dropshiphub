@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 import pandas as pd
 
@@ -29,6 +29,68 @@ class IssueTrackerStore:
     def save(self, data: Dict[str, Dict[str, Any]]) -> None:
         self._ensure_parent()
         self.path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+    # ============================================================
+    # Maintenance helpers (NEW)
+    # ============================================================
+    def clear_resolved(self) -> Tuple[int, int]:
+        """
+        Remove ALL entries where resolved == True.
+        Returns: (removed_count, remaining_count)
+        """
+        data = self.load()
+        before = len(data)
+        kept = {k: v for k, v in data.items() if not bool((v or {}).get("resolved", False))}
+        removed = before - len(kept)
+        self.save(kept)
+        return removed, len(kept)
+
+    def prune_resolved(self, older_than_days: int = 30) -> Tuple[int, int]:
+        """
+        Remove entries that are resolved and whose updated_at is older than N days.
+        If updated_at is missing or invalid, we keep the record (safer).
+        Returns: (removed_count, remaining_count)
+        """
+        days = int(older_than_days)
+        data = self.load()
+        before = len(data)
+
+        cutoff = pd.Timestamp.utcnow().tz_localize("UTC") - pd.Timedelta(days=days)
+
+        kept: Dict[str, Dict[str, Any]] = {}
+        removed = 0
+
+        for k, v in data.items():
+            v = v or {}
+            is_resolved = bool(v.get("resolved", False))
+
+            if not is_resolved:
+                kept[k] = v
+                continue
+
+            # resolved == True: check updated_at
+            updated_at = v.get("updated_at", "")
+            try:
+                ts = pd.to_datetime(updated_at, errors="coerce", utc=True)
+            except Exception:
+                ts = pd.NaT
+
+            # If timestamp is missing/invalid -> keep (don’t accidentally wipe)
+            if pd.isna(ts):
+                kept[k] = v
+                continue
+
+            if ts < cutoff:
+                removed += 1
+            else:
+                kept[k] = v
+
+        if removed != (before - len(kept)):
+            # sanity (should always match, but keep safe)
+            removed = before - len(kept)
+
+        self.save(kept)
+        return removed, len(kept)
 
 
 def make_issue_id(row: pd.Series) -> str:
