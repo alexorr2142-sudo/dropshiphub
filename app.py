@@ -25,7 +25,26 @@ PUBLIC_REVIEW_MODE = False
 # Optional feature imports (do NOT crash if missing)
 # ============================================================
 render_sla_escalations = None
+
 IssueTrackerStore = None
+CONTACT_STATUSES = ["Not Contacted", "Contacted", "Waiting", "Escalated", "Resolved"]
+
+mailto_link = None
+
+build_customer_impact_view = None
+render_customer_impact_view = None
+
+render_customer_comms_ui = None
+render_comms_pack_download = None
+
+build_daily_action_list = None
+render_daily_action_list = None
+
+render_kpi_trends = None
+
+build_supplier_accountability_view = None
+render_supplier_accountability = None
+
 
 build_customer_impact_view = None
 render_customer_impact_view = None
