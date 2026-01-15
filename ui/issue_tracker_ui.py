@@ -1,4 +1,4 @@
-# dropshiphub/ui/issue_tracker_ui.py
+# ui/issue_tracker_ui.py
 from __future__ import annotations
 
 from datetime import datetime
@@ -7,20 +7,16 @@ from typing import Tuple
 import pandas as pd
 import streamlit as st
 
-from dropshiphub.core.issue_tracker import IssueTrackerStore
+# ✅ FIXED: top-level import
+from core.issue_tracker import IssueTrackerStore
 
 
 def apply_issue_tracker_fields(df: pd.DataFrame, store: IssueTrackerStore) -> pd.DataFrame:
-    """
-    Adds: Resolved (bool), Notes (str) columns to df based on issue_id.
-    Safe if df is empty or has no issue_id.
-    """
     if df is None or df.empty or "issue_id" not in df.columns:
         return df
 
     issue_map = store.load()
     out = df.copy()
-
     out["Resolved"] = out["issue_id"].map(lambda k: bool(issue_map.get(str(k), {}).get("resolved", False)))
     out["Notes"] = out["issue_id"].map(lambda k: str(issue_map.get(str(k), {}).get("notes", "") or ""))
     return out
@@ -34,13 +30,9 @@ def filter_unresolved(df: pd.DataFrame) -> pd.DataFrame:
 
 def render_issue_tracker_editor(
     df: pd.DataFrame,
-    title: str = "Exceptions Issue Tracker",
+    title: str = "Resolved + Notes (Issue Tracker)",
     key: str = "issue_tracker_editor",
 ) -> Tuple[pd.DataFrame, bool]:
-    """
-    Renders a data_editor for Resolved + Notes.
-    Returns: (edited_df, saved_bool)
-    """
     store = IssueTrackerStore()
     df = apply_issue_tracker_fields(df, store)
 
@@ -54,18 +46,16 @@ def render_issue_tracker_editor(
         st.warning("Issue tracking requires an issue_id column, but none was found.")
         return df, False
 
-    # Controls
-    c1, c2, c3 = st.columns([1, 1, 2])
+    c1, c2, _ = st.columns([1, 1, 2])
     with c1:
         hide_resolved = st.toggle("Hide resolved", value=True, key=f"{key}_hide")
     with c2:
-        show_only_open = st.toggle("Only open", value=True, key=f"{key}_only_open")
-    if hide_resolved or show_only_open:
-        view = df[df["Resolved"] == False].copy()
-    else:
-        view = df.copy()
+        only_open = st.toggle("Only open", value=True, key=f"{key}_only_open")
 
-    # Put editable columns first
+    view = df.copy()
+    if hide_resolved or only_open:
+        view = view[view["Resolved"] == False].copy()
+
     front = ["Resolved", "Notes", "issue_id"]
     cols = front + [c for c in view.columns if c not in front]
 
