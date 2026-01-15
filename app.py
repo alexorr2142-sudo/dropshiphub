@@ -18,7 +18,7 @@ import streamlit.components.v1 as components
 # True  => bypass passcode + email allowlist gates
 # False => gates enforced as normal
 # ============================================================
-PUBLIC_REVIEW_MODE = True
+PUBLIC_REVIEW_MODE = False
 
 
 # ============================================================
