@@ -2,6 +2,17 @@
 import pandas as pd
 
 
+def _series(df: pd.DataFrame, col: str, default: str = "") -> pd.Series:
+    """
+    Safe column getter that ALWAYS returns a Series aligned to df length.
+    """
+    if df is None or df.empty:
+        return pd.Series([], dtype="object")
+    if col in df.columns:
+        return df[col].astype(str).fillna("")
+    return pd.Series([default] * len(df), index=df.index, dtype="object")
+
+
 def build_daily_action_list(
     exceptions: pd.DataFrame,
     followups: pd.DataFrame,
@@ -15,25 +26,22 @@ def build_daily_action_list(
       - watchlist (DataFrame)
       - summary (dict)
     """
-
     exc = exceptions.copy() if exceptions is not None else pd.DataFrame()
     fu = followups.copy() if followups is not None else pd.DataFrame()
 
-    # Helper: urgency sort order
-    urgency_rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-    escalation_rank = {"Escalate": 0, "Firm Follow-up": 1, "Reminder": 2, "On Track": 9}
-
     # ---------- Customer actions (from exceptions) ----------
     customer_actions = pd.DataFrame()
-    if not exc.empty:
-        blob = (
-            exc.get("issue_type", "").astype(str).fillna("") + " " +
-            exc.get("explanation", "").astype(str).fillna("") + " " +
-            exc.get("next_action", "").astype(str).fillna("") + " " +
-            exc.get("line_status", "").astype(str).fillna("")
-        ).str.lower()
 
-        is_urgent = exc.get("Urgency", "").astype(str).isin(["Critical", "High"])
+    if exc is not None and not exc.empty:
+        issue_type = _series(exc, "issue_type")
+        explanation = _series(exc, "explanation")
+        next_action = _series(exc, "next_action")
+        line_status = _series(exc, "line_status")
+        urgency = _series(exc, "Urgency")  # safe even if missing
+
+        blob = (issue_type + " " + explanation + " " + next_action + " " + line_status).str.lower()
+
+        is_urgent = urgency.isin(["Critical", "High"])
         is_customer_pain = blob.str.contains(
             "late|overdue|past due|missing tracking|no tracking|exception|lost|stuck|returned",
             regex=True,
@@ -47,61 +55,58 @@ def build_daily_action_list(
             "issue_type", "line_status", "explanation", "next_action", "customer_risk"
         ] if c in customer_actions.columns]
 
-        customer_actions = customer_actions[keep].copy()
+        if keep:
+            customer_actions = customer_actions[keep]
 
-        # Better sort: Urgency first (Critical -> High -> Medium -> Low), then order_id
-        if "Urgency" in customer_actions.columns:
-            customer_actions["_u"] = customer_actions["Urgency"].astype(str).map(urgency_rank).fillna(9)
-
-        sort_cols = [c for c in ["_u", "customer_risk", "order_id"] if c in customer_actions.columns]
+        # best-effort sort
+        sort_cols = [c for c in ["Urgency", "customer_risk", "order_id"] if c in customer_actions.columns]
         if sort_cols:
             customer_actions = customer_actions.sort_values(sort_cols, ascending=True)
 
-        customer_actions = customer_actions.drop(columns=["_u"], errors="ignore").head(max_items)
+        customer_actions = customer_actions.head(int(max_items))
 
     # ---------- Supplier actions (from followups) ----------
     supplier_actions = pd.DataFrame()
+
     if fu is not None and not fu.empty:
-        # Prefer escalation signal if present (Feature 6)
-        if "worst_escalation" in fu.columns:
-            fu["_prio"] = fu["worst_escalation"].astype(str).map(escalation_rank).fillna(5)
-        else:
-            # fallback to existing urgency column (if any)
-            fu["_prio"] = fu.get("urgency", pd.Series([""] * len(fu))).astype(str).map(urgency_rank).fillna(5)
+        keep = [c for c in ["supplier_name", "supplier_email", "item_count", "order_ids", "urgency", "worst_escalation", "subject"] if c in fu.columns]
+        supplier_actions = fu[keep].copy() if keep else fu.copy()
 
-        keep = [c for c in [
-            "supplier_name",
-            "supplier_email",
-            "item_count",
-            "order_ids",
-            "worst_escalation",
-            "urgency",
-            "subject",
-        ] if c in fu.columns]
-
-        supplier_actions = fu[keep + ["_prio"]].copy()
-
-        # Sort: escalation priority first, then item_count desc
+        # sort: item_count desc if exists
         if "item_count" in supplier_actions.columns:
             try:
                 supplier_actions["_ic"] = pd.to_numeric(supplier_actions["item_count"], errors="coerce").fillna(0)
+                supplier_actions = supplier_actions.sort_values("_ic", ascending=False).drop(columns=["_ic"])
             except Exception:
-                supplier_actions["_ic"] = 0
-        else:
-            supplier_actions["_ic"] = 0
+                pass
 
-        supplier_actions = supplier_actions.sort_values(["_prio", "_ic"], ascending=[True, False])
-        supplier_actions = supplier_actions.drop(columns=["_prio", "_ic"], errors="ignore").head(max_items)
+        # If SLA escalation exists, push worse escalations to top
+        if "worst_escalation" in supplier_actions.columns:
+            rank = {"Escalate": 4, "Firm Follow-up": 3, "Reminder": 2, "At Risk (72h)": 1, "On Track": 0}
+            try:
+                supplier_actions["_er"] = supplier_actions["worst_escalation"].astype(str).map(rank).fillna(0)
+                supplier_actions = supplier_actions.sort_values(["_er"], ascending=False).drop(columns=["_er"])
+            except Exception:
+                pass
+
+        supplier_actions = supplier_actions.head(int(max_items))
 
     # ---------- Watchlist (medium urgency exceptions) ----------
     watchlist = pd.DataFrame()
-    if not exc.empty and "Urgency" in exc.columns:
-        watchlist = exc[exc["Urgency"].astype(str).isin(["Medium"])].copy()
+    if exc is not None and not exc.empty:
+        urgency = _series(exc, "Urgency")
+        watch_mask = urgency.isin(["Medium"])
+        watchlist = exc[watch_mask].copy()
+
         keep = [c for c in [
             "Urgency", "order_id", "sku", "supplier_name",
             "issue_type", "line_status", "next_action"
         ] if c in watchlist.columns]
-        watchlist = watchlist[keep].head(max_items)
+
+        if keep:
+            watchlist = watchlist[keep]
+
+        watchlist = watchlist.head(int(max_items))
 
     # ---------- Summary ----------
     summary = {
