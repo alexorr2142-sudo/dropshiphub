@@ -765,9 +765,6 @@ st.set_page_config(page_title="Dropship Hub", layout="wide")
 
 ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
 
-st.title("Dropship Hub" + (" — Public Review" if PUBLIC_REVIEW_MODE else " — Early Access"))
-st.caption("Drop ship made easy — exceptions, follow-ups, and visibility in one hub.")
-
 if not PUBLIC_REVIEW_MODE:
     code = st.text_input("Enter early access code", type="password", key="auth_access_code")
     if code != ACCESS_CODE:
