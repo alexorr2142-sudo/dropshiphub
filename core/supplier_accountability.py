@@ -6,14 +6,17 @@ def _safe_s(x) -> str:
     return "" if x is None else str(x)
 
 
-def build_supplier_accountability_view(scorecard: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+def build_supplier_accountability_view(
+    scorecard: pd.DataFrame | None = None,
+    top_n: int = 10,
+) -> pd.DataFrame:
     """
     Returns a ranked supplier table designed for accountability conversations.
     Expected scorecard cols (best-effort):
       supplier_name, total_lines, exception_lines, exception_rate, critical, high,
       missing_tracking_flags, late_flags, carrier_exception_flags
     """
-    if scorecard is None or scorecard.empty:
+    if scorecard is None or not isinstance(scorecard, pd.DataFrame) or scorecard.empty:
         return pd.DataFrame()
 
     df = scorecard.copy()
@@ -33,9 +36,6 @@ def build_supplier_accountability_view(scorecard: pd.DataFrame, top_n: int = 10)
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
     # A simple weighted pain score
-    # - Critical issues are the biggest
-    # - Exception rate matters
-    # - Late / missing tracking are major drivers
     df["pain_score"] = (
         df.get("critical", 0) * 5
         + df.get("high", 0) * 2
@@ -61,6 +61,34 @@ def build_supplier_accountability_view(scorecard: pd.DataFrame, top_n: int = 10)
 
     out = df[cols].sort_values(["pain_score", "exception_lines"], ascending=False).head(int(top_n))
     return out
+
+
+# -------------------------------------------------------------------
+# ✅ Compatibility wrapper: allows app.py to call with many possible kwargs
+# (e.g., exceptions=..., followups=..., escalations_df=..., etc.)
+# and it will still work by extracting/using only what we need (scorecard).
+# -------------------------------------------------------------------
+def build_supplier_accountability_view_compat(*args, **kwargs) -> pd.DataFrame:
+    """
+    Accepts many possible argument styles and routes to build_supplier_accountability_view.
+
+    Supported calling patterns:
+      - build_supplier_accountability_view_compat(scorecard_df, top_n=10)
+      - build_supplier_accountability_view_compat(scorecard=scorecard_df, top_n=10)
+      - build_supplier_accountability_view_compat(..., scorecard_df passed as first positional)
+    """
+    # 1) if explicitly provided
+    scorecard = kwargs.get("scorecard", None)
+
+    # 2) if passed positionally
+    if scorecard is None and len(args) > 0:
+        if isinstance(args[0], pd.DataFrame):
+            scorecard = args[0]
+
+    # 3) top_n
+    top_n = kwargs.get("top_n", 10)
+
+    return build_supplier_accountability_view(scorecard=scorecard, top_n=int(top_n))
 
 
 def draft_supplier_performance_note(row: dict) -> dict:
