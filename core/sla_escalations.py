@@ -4,6 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import pandas as pd
 
+# ✅ Step 2 import (NEW)
+from dropshiphub.core.issue_tracker import make_issue_id
+
 
 # -------------------------------
 # Helpers
@@ -73,6 +76,25 @@ def _pick_created_date_col(df: pd.DataFrame) -> str | None:
         if _safe_col(df, c):
             return c
     return None
+
+
+# ✅ Step 2 helper (NEW)
+def _attach_issue_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensures df has a stable issue_id column for issue tracking.
+
+    - Safe on None/empty frames
+    - Won't overwrite if issue_id already exists
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+
+    if "issue_id" in df.columns:
+        return df
+
+    out = df.copy()
+    out["issue_id"] = out.apply(make_issue_id, axis=1)
+    return out
 
 
 # -------------------------------
@@ -145,88 +167,5 @@ def build_sla_escalations(
     if work.empty:
         return pd.DataFrame(), fu
 
-    now = _now_utc()
-
-    # ✅ FIX: both sides are tz-aware UTC now, subtraction always works
-    work["_days_to_due"] = (work["_due_dt"] - now).dt.total_seconds() / 86400.0
-
-    # Bucket logic
-    # - Overdue => Escalate / Firm follow-up depending on how late
-    # - Due soon => At Risk / Reminder
-    at_risk_days = float(at_risk_hours) / 24.0
-
-    def _bucket(days_to_due: float) -> str:
-        if pd.isna(days_to_due):
-            return "Unknown"
-        if days_to_due < -3:
-            return "Escalate"
-        if days_to_due < 0:
-            return "Firm Follow-up"
-        if days_to_due <= at_risk_days:
-            return "At Risk (72h)"
-        if days_to_due <= 7:
-            return "Reminder"
-        return "On Track"
-
-    work["_bucket"] = work["_days_to_due"].apply(_bucket)
-
-    # Supplier-level summary
-    grp = (
-        work.groupby(["supplier_name", "_bucket"])
-        .size()
-        .reset_index(name="open_lines")
-    )
-
-    pivot = grp.pivot_table(
-        index="supplier_name",
-        columns="_bucket",
-        values="open_lines",
-        aggfunc="sum",
-        fill_value=0,
-    ).reset_index()
-
-    # Ensure consistent columns
-    wanted = ["Escalate", "Firm Follow-up", "At Risk (72h)", "Reminder", "On Track", "Unknown"]
-    for c in wanted:
-        if c not in pivot.columns:
-            pivot[c] = 0
-
-    pivot["open_lines_total"] = pivot[wanted].sum(axis=1)
-
-    # Worst escalation label per supplier
-    def _worst(row) -> str:
-        if int(row.get("Escalate", 0)) > 0:
-            return "Escalate"
-        if int(row.get("Firm Follow-up", 0)) > 0:
-            return "Firm Follow-up"
-        if int(row.get("At Risk (72h)", 0)) > 0:
-            return "At Risk (72h)"
-        if int(row.get("Reminder", 0)) > 0:
-            return "Reminder"
-        if int(row.get("On Track", 0)) > 0:
-            return "On Track"
-        return "Unknown"
-
-    pivot["worst_escalation"] = pivot.apply(_worst, axis=1)
-
-    # Order suppliers by worst escalation then volume
-    rank = {"Escalate": 5, "Firm Follow-up": 4, "At Risk (72h)": 3, "Reminder": 2, "On Track": 1, "Unknown": 0}
-    pivot["_rank"] = pivot["worst_escalation"].map(rank).fillna(0)
-    pivot = pivot.sort_values(["_rank", "open_lines_total"], ascending=[False, False]).drop(columns=["_rank"])
-
-    escalations_df = pivot[
-        ["supplier_name", "worst_escalation", "open_lines_total"]
-        + [c for c in wanted if c in pivot.columns]
-    ].copy()
-
-    # Annotate followups with escalation status
-    updated_fu = fu.copy()
-    if not updated_fu.empty and "supplier_name" in updated_fu.columns:
-        updated_fu = updated_fu.merge(
-            escalations_df[["supplier_name", "worst_escalation"]],
-            on="supplier_name",
-            how="left",
-        )
-        updated_fu["worst_escalation"] = updated_fu["worst_escalation"].fillna("On Track")
-
-    return escalations_df, updated_fu
+    # ✅ Step 2: attach issue_id at the line level (NEW)
+    work
