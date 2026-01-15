@@ -15,8 +15,8 @@ import streamlit.components.v1 as components
 
 # ============================================================
 # 🔓 PUBLIC REVIEW MODE (TEMP)
-# Set to True to bypass access code + email allowlist
-# Set back to False after review
+# True  => bypass passcode + email allowlist gates
+# False => gates enforced as normal
 # ============================================================
 PUBLIC_REVIEW_MODE = True
 
@@ -61,6 +61,7 @@ try:
 except Exception:
     render_customer_impact_view = None
 
+# customer comms UI (email-first)
 try:
     from ui.customer_comms_ui import render_customer_comms_ui  # type: ignore
 except Exception:
@@ -86,331 +87,7 @@ try:
 except Exception:
     render_kpi_trends = None
 
-try:
-    from core.supplier_accountability import build_supplier_accountability_view  # type: ignore
-except Exception:
-    build_supplier_accountability_view = None
-
-try:
-    from ui.supplier_accountability_ui import render_supplier_accountability  # type: ignore
-except Exception:
-    render_supplier_accountability = None
-
-
-# --- Local modules (your repo files) ---
-try:
-    from normalize import normalize_orders, normalize_shipments, normalize_tracking
-    from reconcile import reconcile_all
-    from explain import enhance_explanations
-except Exception as e:
-    st.set_page_config(page_title="Dropship Hub", layout="wide")
-    st.title("Dropship Hub")
-    st.error("Import error: one of your local .py files is missing or has an error.")
-    st.code(str(e))
-    st.stop()
-
-
-# ============================================================
-# Helpers
-# ============================================================
-def copy_button(text: str, label: str, key: str):
-    safe_text = (
-        str(text)
-        .replace("\\", "\\\\")
-        .replace("`", "\\`")
-        .replace("${", "\\${")
-    )
-    html = f"""
-    <div style="margin: 0.25rem 0;">
-      <button
-        id="btn-{key}"
-        style="
-          padding: 0.45rem 0.75rem;
-          border-radius: 0.5rem;
-          border: 1px solid rgba(49, 51, 63, 0.2);
-          background: white;
-          cursor: pointer;
-          font-size: 0.9rem;
-        "
-        onclick="navigator.clipboard.writeText(`{safe_text}`)
-          .then(() => {{
-            const b = document.getElementById('btn-{key}');
-            const old = b.innerText;
-            b.innerText = 'Copied ✅';
-            setTimeout(() => b.innerText = old, 1200);
-          }})
-          .catch(() => alert('Copy failed. Your browser may block clipboard access.'));"
-      >
-        {label}
-      </button>
-    </div>
-    """
-    components.html(html, height=55)
-
-
-def call_with_accepted_kwargs(fn, **kwargs):
-    sig = inspect.signature(fn)
-    accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
-    return fn(**accepted)
-
-
-def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
-    df = exceptions_df.copy()
-
-    def classify_row(row) -> str:
-        issue_type = str(row.get("issue_type", "")).lower()
-        explanation = str(row.get("explanation", "")).lower()
-        next_action = str(row.get("next_action", "")).lower()
-        risk = str(row.get("customer_risk", "")).lower()
-        line_status = str(row.get("line_status", "")).lower()
-        blob = " ".join([issue_type, explanation, next_action, risk, line_status])
-
-        critical_terms = [
-            "late", "past due", "overdue", "late unshipped",
-            "missing tracking", "no tracking", "tracking missing",
-            "carrier exception", "exception", "lost", "stuck", "seized",
-            "returned to sender", "address missing", "missing address",
-        ]
-        if any(t in blob for t in critical_terms):
-            return "Critical"
-
-        high_terms = [
-            "partial", "partial shipment",
-            "mismatch", "quantity mismatch",
-            "invalid tracking", "tracking invalid",
-            "carrier unknown", "unknown carrier",
-        ]
-        if any(t in blob for t in high_terms):
-            return "High"
-
-        medium_terms = ["verify", "check", "confirm", "format", "invalid", "missing", "contact"]
-        if any(t in blob for t in medium_terms):
-            return "Medium"
-
-        return "Low"
-
-    df["Urgency"] = df.apply(classify_row, axis=1)
-    df["Urgency"] = pd.Categorical(df["Urgency"], categories=["Critical", "High", "Medium", "Low"], ordered=True)
-    return df
-
-
-def style_exceptions_table(df: pd.DataFrame):
-    if "Urgency" not in df.columns:
-        return df.style
-
-    colors = {
-        "Critical": "background-color: #ffd6d6;",
-        "High": "background-color: #fff1cc;",
-        "Medium": "background-color: #f3f3f3;",
-        "Low": ""
-    }
-
-    def row_style(row):
-        u = str(row.get("Urgency", "Low"))
-        return [colors.get(u, "")] * len(row)
-
-    return df.style.apply(row_style, axis=1)
-
-
-def make_daily_ops_pack_bytes(
-    exceptions: pd.DataFrame,
-    followups: pd.DataFrame,
-    order_rollup: pd.DataFrame,
-    line_status_df: pd.DataFrame,
-    kpis: dict,
-    supplier_scorecards: pd.DataFrame | None = None,
-    customer_impact: pd.DataFrame | None = None,
-) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("exceptions.csv", (exceptions if exceptions is not None else pd.DataFrame()).to_csv(index=False))
-        z.writestr("supplier_followups.csv", (followups if followups is not None else pd.DataFrame()).to_csv(index=False))
-        z.writestr("order_rollup.csv", (order_rollup if order_rollup is not None else pd.DataFrame()).to_csv(index=False))
-        z.writestr("order_line_status.csv", (line_status_df if line_status_df is not None else pd.DataFrame()).to_csv(index=False))
-
-        if supplier_scorecards is not None and not supplier_scorecards.empty:
-            z.writestr("supplier_scorecards.csv", supplier_scorecards.to_csv(index=False))
-
-        if customer_impact is not None and not customer_impact.empty:
-            z.writestr("customer_impact.csv", customer_impact.to_csv(index=False))
-
-        z.writestr("kpis.json", json.dumps(kpis if isinstance(kpis, dict) else {}, indent=2))
-        z.writestr(
-            "README.txt",
-            (
-                "Dropship Hub — Daily Ops Pack\n"
-                "Files:\n"
-                " - exceptions.csv: SKU-level issues to action\n"
-                " - supplier_followups.csv: supplier messages to send (OPEN/unresolved)\n"
-                " - order_rollup.csv: one row per order\n"
-                " - order_line_status.csv: full line-level status\n"
-                " - supplier_scorecards.csv: per-supplier performance snapshot (if available)\n"
-                " - customer_impact.csv: customer comms candidates (if available)\n"
-                " - kpis.json: dashboard KPI snapshot\n"
-            ),
-        )
-    buf.seek(0)
-    return buf.read()
-
-
-# -------------------------------
-# Access gate helpers
-# -------------------------------
-def _parse_allowed_emails_from_env() -> list[str]:
-    raw = os.getenv("DSH_ALLOWED_EMAILS", "").strip()
-    if not raw:
-        return []
-    return [e.strip().lower() for e in raw.split(",") if e.strip()]
-
-
-def get_allowed_emails() -> list[str]:
-    allowed = []
-    try:
-        allowed = st.secrets.get("ALLOWED_EMAILS", [])
-        if isinstance(allowed, str):
-            allowed = [allowed]
-        allowed = [str(e).strip().lower() for e in allowed if str(e).strip()]
-    except Exception:
-        allowed = []
-    allowed_env = _parse_allowed_emails_from_env()
-    return sorted(set(allowed + allowed_env))
-
-
-def require_email_access_gate():
-    # 🔓 Bypass in public review mode
-    if PUBLIC_REVIEW_MODE:
-        return
-
-    st.subheader("Access")
-    email = st.text_input("Work email", key="auth_work_email").strip().lower()
-    allowed = get_allowed_emails()
-
-    if allowed:
-        if not email:
-            st.info("Enter your work email to continue.")
-            st.stop()
-        if email not in allowed:
-            st.error("This email is not authorized for early access.")
-            st.caption("Ask the admin to add your email to the allowlist.")
-            st.stop()
-        st.success("Email verified ✅")
-    else:
-        st.caption("Email verification is currently disabled (accepting all emails).")
-
-
-# ============================================================
-# Page setup
-# ============================================================
-st.set_page_config(page_title="Dropship Hub", layout="wide")
-
-ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
-
-st.title("Dropship Hub")
-st.caption("Drop ship made easy — exceptions, follow-ups, and visibility in one hub.")
-
-# 🔓 Access gate (bypassed in public review mode)
-if not PUBLIC_REVIEW_MODE:
-    code = st.text_input("Enter early access code", type="password", key="auth_access_code")
-    if code != ACCESS_CODE:
-        st.info("This app is currently in early access. Enter your code to continue.")
-        st.stop()
-
-require_email_access_gate()
-
-
-# -------------------------------
-# Paths
-# -------------------------------
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-WORKSPACES_DIR = DATA_DIR / "workspaces"
-if WORKSPACES_DIR.exists() and not WORKSPACES_DIR.is_dir():
-    st.error("Workspace storage path invalid: `data/workspaces` exists but is a FILE.")
-    st.stop()
-WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
-
-SUPPLIERS_DIR = DATA_DIR / "suppliers"
-if SUPPLIERS_DIR.exists() and not SUPPLIERS_DIR.is_dir():
-    st.error("Supplier storage path invalid: `data/suppliers` exists but is a FILE.")
-    st.stop()
-SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-# -------------------------------
-# (Everything below this line stays EXACTLY as your current app.py)
-# Paste the rest of your existing file below unchanged
-# -------------------------------
-
-
-# ============================================================
-# Optional feature imports (do NOT crash if missing)
-# ============================================================
-render_sla_escalations = None
-IssueTrackerStore = None
-
-build_customer_impact_view = None
-render_customer_impact_view = None
-
-render_customer_comms_ui = None
-render_comms_pack_download = None
-
-build_daily_action_list = None
-render_daily_action_list = None
-
-render_kpi_trends = None
-
-build_supplier_accountability_view = None
-render_supplier_accountability = None
-
-try:
-    from ui.sla_escalations_ui import render_sla_escalations  # type: ignore
-except Exception:
-    render_sla_escalations = None
-
-try:
-    from core.issue_tracker import IssueTrackerStore  # type: ignore
-except Exception:
-    IssueTrackerStore = None
-
-try:
-    from core.customer_impact import build_customer_impact_view  # type: ignore
-except Exception:
-    build_customer_impact_view = None
-
-try:
-    from ui.customer_impact_ui import render_customer_impact_view  # type: ignore
-except Exception:
-    render_customer_impact_view = None
-
-# ✅ NEW: customer comms UI (email-first)
-try:
-    from ui.customer_comms_ui import render_customer_comms_ui  # type: ignore
-except Exception:
-    render_customer_comms_ui = None
-
-try:
-    from ui.comms_pack_ui import render_comms_pack_download  # type: ignore
-except Exception:
-    render_comms_pack_download = None
-
-try:
-    from core.actions import build_daily_action_list  # type: ignore
-except Exception:
-    build_daily_action_list = None
-
-try:
-    from ui.actions_ui import render_daily_action_list  # type: ignore
-except Exception:
-    render_daily_action_list = None
-
-try:
-    from ui.kpi_trends_ui import render_kpi_trends  # type: ignore
-except Exception:
-    render_kpi_trends = None
-
-# ✅ supplier accountability core + ui
+# supplier accountability core + ui
 try:
     from core.supplier_accountability import build_supplier_accountability_view  # type: ignore
 except Exception:
@@ -606,6 +283,10 @@ def get_allowed_emails() -> list[str]:
 
 
 def require_email_access_gate():
+    # 🔓 Public review bypass
+    if PUBLIC_REVIEW_MODE:
+        return
+
     st.subheader("Access")
     email = st.text_input("Work email", key="auth_work_email").strip().lower()
     allowed = get_allowed_emails()
@@ -1084,13 +765,14 @@ st.set_page_config(page_title="Dropship Hub", layout="wide")
 
 ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
 
-st.title("Dropship Hub — Early Access")
+st.title("Dropship Hub" + (" — Public Review" if PUBLIC_REVIEW_MODE else " — Early Access"))
 st.caption("Drop ship made easy — exceptions, follow-ups, and visibility in one hub.")
 
-code = st.text_input("Enter early access code", type="password", key="access_code")
-if code != ACCESS_CODE:
-    st.info("This app is currently in early access. Enter your code to continue.")
-    st.stop()
+if not PUBLIC_REVIEW_MODE:
+    code = st.text_input("Enter early access code", type="password", key="auth_access_code")
+    if code != ACCESS_CODE:
+        st.info("This app is currently in early access. Enter your code to continue.")
+        st.stop()
 
 require_email_access_gate()
 
@@ -1116,22 +798,38 @@ SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # -------------------------------
-# Sidebar
+# Sidebar (ALL widgets get explicit keys to avoid DuplicateElementId)
 # -------------------------------
 with st.sidebar:
     st.header("Plan")
-    _plan = st.selectbox("Current plan", ["Early Access (Free)", "Pro", "Team"], index=0)
+    _plan = st.selectbox(
+        "Current plan",
+        ["Early Access (Free)", "Pro", "Team"],
+        index=0,
+        key="sidebar_plan",
+    )
 
     st.divider()
     st.header("Tenant")
-    account_id = st.text_input("account_id", value="demo_account")
-    store_id = st.text_input("store_id", value="demo_store")
-    platform_hint = st.selectbox("platform hint", ["shopify", "amazon", "etsy", "other"], index=0)
+    account_id = st.text_input("account_id", value="demo_account", key="tenant_account_id")
+    store_id = st.text_input("store_id", value="demo_store", key="tenant_store_id")
+    platform_hint = st.selectbox(
+        "platform hint",
+        ["shopify", "amazon", "etsy", "other"],
+        index=0,
+        key="tenant_platform_hint",
+    )
 
     st.divider()
     st.header("Defaults")
-    default_currency = st.text_input("Default currency", value="USD")
-    default_promised_ship_days = st.number_input("Default promised ship days (SLA)", min_value=1, max_value=30, value=3)
+    default_currency = st.text_input("Default currency", value="USD", key="defaults_currency")
+    default_promised_ship_days = st.number_input(
+        "Default promised ship days (SLA)",
+        min_value=1,
+        max_value=30,
+        value=3,
+        key="defaults_sla_days",
+    )
 
     st.divider()
     st.header("Demo Mode (Sticky)")
@@ -1146,30 +844,37 @@ with st.sidebar:
     if demo_mode:
         cdm1, cdm2 = st.columns(2)
         with cdm1:
-            if st.button("Reset demo", use_container_width=True):
+            if st.button("Reset demo", use_container_width=True, key="btn_demo_reset"):
                 _reset_demo_tables(DATA_DIR)
                 st.success("Demo reset ✅")
                 st.rerun()
         with cdm2:
-            if st.button("Clear demo", use_container_width=True):
+            if st.button("Clear demo", use_container_width=True, key="btn_demo_clear"):
                 st.session_state["demo_mode"] = False
                 _init_demo_tables_if_needed(DATA_DIR)
                 st.rerun()
 
-    # ✅ Issue Tracker maintenance
+    # Issue Tracker maintenance
     if IssueTrackerStore is not None:
         st.divider()
         with st.expander("Issue Tracker Maintenance", expanded=False):
-            prune_days = st.number_input("Prune resolved older than (days)", min_value=1, max_value=365, value=30, step=1)
+            prune_days = st.number_input(
+                "Prune resolved older than (days)",
+                min_value=1,
+                max_value=365,
+                value=30,
+                step=1,
+                key="issue_prune_days",
+            )
             cmt1, cmt2 = st.columns(2)
             with cmt1:
-                if st.button("🧹 Prune old resolved", use_container_width=True):
+                if st.button("🧹 Prune old resolved", use_container_width=True, key="btn_issue_prune"):
                     store = IssueTrackerStore()
                     removed = store.prune_resolved_older_than_days(int(prune_days))
                     st.success(f"Pruned {removed} resolved item(s).")
                     st.rerun()
             with cmt2:
-                if st.button("🗑️ Clear ALL resolved", use_container_width=True):
+                if st.button("🗑️ Clear ALL resolved", use_container_width=True, key="btn_issue_clear"):
                     store = IssueTrackerStore()
                     removed = store.clear_resolved()
                     st.success(f"Cleared {removed} resolved item(s).")
@@ -1297,11 +1002,11 @@ st.divider()
 st.subheader("Upload your data")
 col1, col2, col3 = st.columns(3)
 with col1:
-    f_orders = st.file_uploader("Orders CSV (Shopify export or generic)", type=["csv"])
+    f_orders = st.file_uploader("Orders CSV (Shopify export or generic)", type=["csv"], key="uploader_orders")
 with col2:
-    f_shipments = st.file_uploader("Shipments CSV (supplier export)", type=["csv"])
+    f_shipments = st.file_uploader("Shipments CSV (supplier export)", type=["csv"], key="uploader_shipments")
 with col3:
-    f_tracking = st.file_uploader("Tracking CSV (optional)", type=["csv"])
+    f_tracking = st.file_uploader("Tracking CSV (optional)", type=["csv"], key="uploader_tracking")
 
 
 # -------------------------------
@@ -1319,11 +1024,29 @@ suppliers_template = pd.DataFrame(columns=["supplier_name", "supplier_email", "s
 
 t1, t2, t3 = st.columns(3)
 with t1:
-    st.download_button("Shipments template CSV", data=shipments_template.to_csv(index=False).encode("utf-8"), file_name="shipments_template.csv", mime="text/csv")
+    st.download_button(
+        "Shipments template CSV",
+        data=shipments_template.to_csv(index=False).encode("utf-8"),
+        file_name="shipments_template.csv",
+        mime="text/csv",
+        key="dl_shipments_template",
+    )
 with t2:
-    st.download_button("Tracking template CSV", data=tracking_template.to_csv(index=False).encode("utf-8"), file_name="tracking_template.csv", mime="text/csv")
+    st.download_button(
+        "Tracking template CSV",
+        data=tracking_template.to_csv(index=False).encode("utf-8"),
+        file_name="tracking_template.csv",
+        mime="text/csv",
+        key="dl_tracking_template",
+    )
 with t3:
-    st.download_button("Suppliers template CSV", data=suppliers_template.to_csv(index=False).encode("utf-8"), file_name="suppliers_template.csv", mime="text/csv")
+    st.download_button(
+        "Suppliers template CSV",
+        data=suppliers_template.to_csv(index=False).encode("utf-8"),
+        file_name="suppliers_template.csv",
+        mime="text/csv",
+        key="dl_suppliers_template",
+    )
 
 
 # -------------------------------
@@ -1658,13 +1381,13 @@ else:
 
     f1, f2, f3, f4 = st.columns(4)
     with f1:
-        st.button("All", on_click=set_triage, args=("All",), use_container_width=True)
+        st.button("All", on_click=set_triage, args=("All",), use_container_width=True, key="triage_btn_all")
     with f2:
-        st.button("Critical + High", on_click=set_triage, args=("CriticalHigh",), use_container_width=True)
+        st.button("Critical + High", on_click=set_triage, args=("CriticalHigh",), use_container_width=True, key="triage_btn_crit_high")
     with f3:
-        st.button("Missing tracking", on_click=set_triage, args=("MissingTracking",), use_container_width=True)
+        st.button("Missing tracking", on_click=set_triage, args=("MissingTracking",), use_container_width=True, key="triage_btn_missing_tracking")
     with f4:
-        st.button("Late unshipped", on_click=set_triage, args=("LateUnshipped",), use_container_width=True)
+        st.button("Late unshipped", on_click=set_triage, args=("LateUnshipped",), use_container_width=True, key="triage_btn_late_unshipped")
 
     triage = exceptions.copy()
     mode = st.session_state["triage_filter"]
@@ -1695,12 +1418,11 @@ else:
         triage = triage.sort_values(sort_cols, ascending=True)
 
     st.dataframe(style_exceptions_table(triage[show_cols].head(10)), use_container_width=True, height=320)
-    st.download_button("⬇️ Download Daily Ops Pack ZIP", data=ops_pack_bytes, file_name=pack_name, mime="application/zip")
+    st.download_button("⬇️ Download Daily Ops Pack ZIP", data=ops_pack_bytes, file_name=pack_name, mime="application/zip", key="dl_ops_pack_main")
 
 
 # ============================================================
-# ✅ Ops Outreach (Comms) — grouped, tabbed, non-repetitive
-# Put BEFORE Exceptions Queue so it’s “do the work” flow
+# Ops Outreach (Comms) — grouped, tabbed, non-repetitive
 # ============================================================
 st.divider()
 st.subheader("Ops Outreach (Comms)")
@@ -1725,7 +1447,6 @@ with tab1:
 
             supplier_email = str(row.get("supplier_email", "")).strip()
             order_ids = str(row.get("order_ids", "")).strip()
-            worst = str(row.get("worst_escalation", "")).strip()
 
             default_subject = str(row.get("subject", "")).strip()
             if not default_subject:
@@ -1772,23 +1493,27 @@ with tab1:
                 key="btn_download_supplier_email_txt",
             )
 
-        # Supplier accountability (optional) — safe signature matching
+        # ✅ Supplier accountability: correct signature build_supplier_accountability_view(scorecard, top_n=10)
         if build_supplier_accountability_view is not None and render_supplier_accountability is not None:
             st.divider()
             st.markdown("#### Supplier Accountability (Auto)")
             try:
-                accountability = call_with_accepted_kwargs(
-                    build_supplier_accountability_view,
-                    followups=followups_for_ops,
-                    followups_df=followups_for_ops,
-                    escalations=escalations_df,
-                    escalations_df=escalations_df,
-                    line_status_df=line_status_df,
-                    line_status=line_status_df,
-                    exceptions=exceptions,
-                    exceptions_df=exceptions,
-                )
-                render_supplier_accountability(accountability)
+                sig = inspect.signature(build_supplier_accountability_view)
+                params = list(sig.parameters.keys())
+
+                if "scorecard" in params:
+                    accountability = build_supplier_accountability_view(scorecard=scorecard, top_n=10)
+                else:
+                    # positional fallback
+                    if len(params) >= 2:
+                        accountability = build_supplier_accountability_view(scorecard, 10)
+                    else:
+                        accountability = build_supplier_accountability_view(scorecard)
+
+                if isinstance(accountability, pd.DataFrame):
+                    render_supplier_accountability(accountability)
+                else:
+                    render_supplier_accountability(pd.DataFrame(accountability))
             except Exception as e:
                 st.warning("Supplier accountability failed to render.")
                 st.code(str(e))
@@ -1799,13 +1524,21 @@ with tab2:
     if customer_impact is None or customer_impact.empty:
         st.info("No customer-impact items detected for this run.")
     else:
-        # Prefer the dedicated Customer Comms UI (compact, non-repetitive)
         if render_customer_comms_ui is not None:
             try:
-                render_customer_comms_ui(customer_impact=customer_impact)
-            except TypeError:
-                # alternate signature
-                render_customer_comms_ui(customer_impact)
+                # ✅ more resilient call (handles ws_root/account/store variants)
+                call_with_accepted_kwargs(
+                    render_customer_comms_ui,
+                    customer_impact=customer_impact,
+                    ws_root=ws_root,
+                    account_id=account_id,
+                    store_id=store_id,
+                )
+            except Exception:
+                try:
+                    render_customer_comms_ui(customer_impact=customer_impact)
+                except Exception:
+                    render_customer_comms_ui(customer_impact)
         else:
             # Compact fallback generator
             cols = customer_impact.columns.tolist()
@@ -1858,7 +1591,20 @@ with tab2:
 with tab3:
     st.caption("Download combined comms artifacts (supplier + customer).")
     if render_comms_pack_download is not None:
-        render_comms_pack_download(followups=followups_open, customer_impact=customer_impact)
+        try:
+            call_with_accepted_kwargs(
+                render_comms_pack_download,
+                followups=followups_open,
+                customer_impact=customer_impact,
+                ws_root=ws_root,
+                account_id=account_id,
+                store_id=store_id,
+            )
+        except Exception:
+            try:
+                render_comms_pack_download(followups=followups_open, customer_impact=customer_impact)
+            except Exception:
+                render_comms_pack_download()
     else:
         st.info("Comms pack UI module not available.")
 
@@ -1876,19 +1622,19 @@ else:
 
     with fcol1:
         issue_types = sorted(exceptions["issue_type"].dropna().unique().tolist()) if "issue_type" in exceptions.columns else []
-        issue_filter = st.multiselect("Issue types", issue_types, default=issue_types)
+        issue_filter = st.multiselect("Issue types", issue_types, default=issue_types, key="exq_issue_types")
 
     with fcol2:
         countries = sorted([c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist() if str(c).strip() != ""])
-        country_filter = st.multiselect("Customer country", countries, default=countries)
+        country_filter = st.multiselect("Customer country", countries, default=countries, key="exq_countries")
 
     with fcol3:
         suppliers = sorted([s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist() if str(s).strip() != ""])
-        supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers)
+        supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers, key="exq_suppliers")
 
     with fcol4:
         urgencies = ["Critical", "High", "Medium", "Low"]
-        urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies)
+        urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies, key="exq_urgency")
 
     filtered = exceptions.copy()
     if issue_filter and "issue_type" in filtered.columns:
@@ -1908,7 +1654,13 @@ else:
     show_cols = [c for c in preferred_cols if c in filtered.columns]
 
     st.dataframe(style_exceptions_table(filtered[show_cols]), use_container_width=True, height=420)
-    st.download_button("Download Exceptions CSV", data=filtered.to_csv(index=False).encode("utf-8"), file_name="exceptions_queue.csv", mime="text/csv")
+    st.download_button(
+        "Download Exceptions CSV",
+        data=filtered.to_csv(index=False).encode("utf-8"),
+        file_name="exceptions_queue.csv",
+        mime="text/csv",
+        key="dl_exceptions_csv",
+    )
 
 
 # -------------------------------
@@ -1922,9 +1674,9 @@ if scorecard is None or scorecard.empty:
 else:
     sc1, sc2 = st.columns(2)
     with sc1:
-        top_n = st.slider("Show top N suppliers", min_value=5, max_value=50, value=15, step=5)
+        top_n = st.slider("Show top N suppliers", min_value=5, max_value=50, value=15, step=5, key="scorecard_top_n")
     with sc2:
-        min_lines = st.number_input("Min total lines", min_value=1, max_value=1000000, value=1, step=1)
+        min_lines = st.number_input("Min total lines", min_value=1, max_value=1000000, value=1, step=1, key="scorecard_min_lines")
 
     view = scorecard[scorecard["total_lines"] >= int(min_lines)].head(int(top_n))
 
@@ -1932,14 +1684,20 @@ else:
     show_cols = [c for c in show_cols if c in view.columns]
     st.dataframe(view[show_cols], use_container_width=True, height=320)
 
-    st.download_button("Download Supplier Scorecards CSV", data=scorecard.to_csv(index=False).encode("utf-8"), file_name="supplier_scorecards.csv", mime="text/csv")
+    st.download_button(
+        "Download Supplier Scorecards CSV",
+        data=scorecard.to_csv(index=False).encode("utf-8"),
+        file_name="supplier_scorecards.csv",
+        mime="text/csv",
+        key="dl_scorecards_csv",
+    )
 
     with st.expander("Trend over time (from saved runs)", expanded=True):
         runs_for_trend = list_runs(ws_root)
         if not runs_for_trend:
             st.caption("No saved runs yet. Click **Save this run** to build trend history.")
         else:
-            max_runs = st.slider("Use last N saved runs", 5, 50, 25, 5)
+            max_runs = st.slider("Use last N saved runs", 5, 50, 25, 5, key="trend_max_runs")
             hist = load_recent_scorecard_history(str(ws_root), max_runs=int(max_runs))
 
             if hist is None or hist.empty:
