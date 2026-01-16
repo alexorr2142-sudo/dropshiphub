@@ -39,6 +39,14 @@ CONTACT_STATUSES = [
 ]
 
 
+def issue_tracker_path_for_ws_root(ws_root: Path) -> Path:
+    """
+    Canonical per-tenant issue tracker location.
+    Matches app.py behavior: <ws_root>/issue_tracker.json
+    """
+    return Path(ws_root) / "issue_tracker.json"
+
+
 def _ensure_contact(rec: Dict[str, Any]) -> Dict[str, Any]:
     """
     Migration-safe: ensures 'contact' exists and has defaults.
@@ -142,7 +150,7 @@ class IssueTrackerStore:
             if not isinstance(data, dict):
                 return {}
             # Ensure all records have contact defaults
-            for k, rec in list(data.items()):
+            for _, rec in list(data.items()):
                 if isinstance(rec, dict):
                     _ensure_contact(rec)
             return data
