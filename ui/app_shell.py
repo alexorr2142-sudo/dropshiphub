@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Callable
 import inspect
+import re
 
 import pandas as pd
 import streamlit as st
@@ -30,7 +31,7 @@ class _ShellDeps:
     reconcile_all: Callable[..., Any]
 
     # pipeline runner
-    run_pipeline: Callable[..., dict]
+    run_pipeline: Callable[..., Any]
 
     # workspaces + issue tracker path helper
     render_workspaces_sidebar: Optional[Callable[..., Any]]
@@ -53,18 +54,62 @@ class _ShellDeps:
     init_paths: Callable[..., tuple[Path, Path, Path, Path]]
 
 
+_UNEXPECTED_KW_RE = re.compile(r"unexpected keyword argument '([^']+)'")
+
+
 def _call_with_accepted_kwargs(fn: Callable[..., Any], **kwargs):
     """
     Backward-compat call helper:
-    only passes kwargs that exist in fn's signature.
+
+    1) Prefer signature-based filtering when possible.
+    2) If signature introspection fails OR the function still raises
+       "unexpected keyword argument", iteratively drop the offending kw
+       and retry a few times.
+
+    This keeps old/new API surfaces compatible without hiding real errors.
     """
+    # Attempt signature-based filtering
+    filtered = dict(kwargs)
     try:
         sig = inspect.signature(fn)
-        accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
-        return fn(**accepted)
+        filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        return fn(**filtered)
+    except TypeError as e:
+        # If it already is an "unexpected keyword" error, we can recover below.
+        msg = str(e)
+        m = _UNEXPECTED_KW_RE.search(msg)
+        if not m:
+            raise
+        # fallthrough to retry loop
+        filtered = dict(kwargs)
     except Exception:
-        # If signature inspection fails for any reason, fall back to direct call.
-        return fn(**kwargs)
+        # signature inspection failed; use retry loop below
+        filtered = dict(kwargs)
+
+    # Retry loop: strip unexpected kwargs if the function complains
+    max_retries = 12
+    last_err: Optional[Exception] = None
+    for _ in range(max_retries):
+        try:
+            return fn(**filtered)
+        except TypeError as e:
+            msg = str(e)
+            m = _UNEXPECTED_KW_RE.search(msg)
+            if not m:
+                # Not an "unexpected kw" — it's a real TypeError (missing args, wrong types, etc.)
+                raise
+            bad_kw = m.group(1)
+            if bad_kw not in filtered:
+                # Can't fix what we can't remove; re-raise
+                raise
+            filtered.pop(bad_kw, None)
+            last_err = e
+
+    # If we exhausted retries, raise the last error
+    if last_err:
+        raise last_err
+    # Safety fallback
+    return fn(**filtered)
 
 
 def _safe_imports() -> _ShellDeps:
@@ -118,11 +163,9 @@ def _safe_imports() -> _ShellDeps:
         render_kpi_trends = None
 
     # Core-ish callables (older sections API expects these injected)
-    # Keep imports inside _safe_imports so failures show as import errors, not silent crashes.
     try:
         from normalize import normalize_orders, normalize_shipments, normalize_tracking
     except Exception:
-        # Fallback path if you moved these under core/
         from core.normalize import normalize_orders, normalize_shipments, normalize_tracking  # type: ignore
 
     try:
@@ -211,9 +254,6 @@ def render_app() -> None:
         uploaded_orders=getattr(uploads, "f_orders", None),
         uploaded_shipments=getattr(uploads, "f_shipments", None),
         uploaded_tracking=getattr(uploads, "f_tracking", None),
-        orders_df=None,
-        shipments_df=None,
-        tracking_df=None,
     )
 
     # Stop if required inputs are missing (unless demo) — tolerate both signatures
@@ -283,18 +323,12 @@ def render_app() -> None:
     )
 
     # Optional: workspaces sidebar (save/load) can override what we show
-    # If missing, we just show the current pipeline output.
     view = dict(pipe) if isinstance(pipe, dict) else {}
-    if "exceptions" not in view:
-        view["exceptions"] = exceptions
-    if "followups_open" not in view:
-        view["followups_open"] = followups_full
-    if "order_rollup" not in view:
-        view["order_rollup"] = order_rollup
-    if "kpis" not in view:
-        view["kpis"] = kpis
-    if "line_status_df" not in view:
-        view["line_status_df"] = line_status_df
+    view.setdefault("exceptions", exceptions)
+    view.setdefault("followups_open", followups_full)
+    view.setdefault("order_rollup", order_rollup)
+    view.setdefault("kpis", kpis)
+    view.setdefault("line_status_df", line_status_df)
 
     if callable(deps.render_workspaces_sidebar):
         try:
@@ -317,7 +351,6 @@ def render_app() -> None:
                 line_status_df=view.get("line_status_df", pd.DataFrame()),
                 kpis=view.get("kpis", {}),
             )
-            # If user loaded a saved run, prefer those outputs for rendering
             if getattr(ws_result, "loaded_run_dir", None):
                 view["exceptions"] = ws_result.exceptions
                 view["followups_open"] = ws_result.followups
