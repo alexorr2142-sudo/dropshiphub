@@ -1,7 +1,6 @@
 # app.py
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pandas as pd
@@ -106,11 +105,12 @@ try:
 except Exception:
     render_diagnostics = None
 
-render_ops_triage = None
+# Optional: dedicated ops triage component (DO NOT name-collide with view wrapper)
+render_ops_triage_component = None
 try:
-    from ui.triage_ui import render_ops_triage  # type: ignore
+    from ui.triage_ui import render_ops_triage as render_ops_triage_component  # type: ignore
 except Exception:
-    render_ops_triage = None
+    render_ops_triage_component = None
 
 render_workspaces_sidebar_and_maybe_override_outputs = None
 try:
@@ -177,18 +177,17 @@ except Exception:
 # ============================================================
 # Internal section helpers (new)
 # ============================================================
-from ui.app_helpers import call_with_accepted_kwargs, mailto_fallback
+from ui.app_helpers import mailto_fallback
 from ui.app_inputs import render_start_here, render_upload_and_templates, resolve_raw_inputs
 from ui.app_pipeline import run_pipeline
 from ui.app_views import (
     render_dashboard,
-    render_ops_triage,
+    render_ops_triage as render_ops_triage_view,
     render_ops_outreach_comms,
     render_exceptions_queue_section,
     render_supplier_scorecards,
     render_sla_escalations_panel,
 )
-
 
 # ============================================================
 # Page setup
@@ -271,7 +270,7 @@ diag = {
     "render_upload_section": render_upload_section is not None,
     "render_onboarding_checklist": render_onboarding_checklist is not None,
     "render_template_downloads": render_template_downloads is not None,
-    "render_ops_triage": render_ops_triage is not None,
+    "render_ops_triage_component": render_ops_triage_component is not None,
     "render_exceptions_queue": render_exceptions_queue is not None,
 }
 if callable(render_diagnostics):
@@ -360,12 +359,12 @@ render_dashboard(
     render_kpi_trends=render_kpi_trends,
 )
 
-render_ops_triage(
+render_ops_triage_view(
     exceptions=run["exceptions"],
     ops_pack_bytes=run["ops_pack_bytes"],
     pack_name=run["pack_name"],
     style_exceptions_table=style_exceptions_table,
-    render_ops_triage=render_ops_triage,
+    render_ops_triage_component=render_ops_triage_component,
 )
 
 render_ops_outreach_comms(
@@ -374,7 +373,9 @@ render_ops_outreach_comms(
     scorecard=run["scorecard"],
     ws_root=run["ws_root"],
     issue_tracker_path=run["issue_tracker_path"],
-    contact_statuses=CONTACT_STATUSES if isinstance(CONTACT_STATUSES, list) else ["Not Contacted", "Contacted", "Waiting", "Escalated", "Resolved"],
+    contact_statuses=CONTACT_STATUSES
+    if isinstance(CONTACT_STATUSES, list)
+    else ["Not Contacted", "Contacted", "Waiting", "Escalated", "Resolved"],
     mailto_link_fn=mailto_link if callable(mailto_link) else mailto_fallback,
     build_supplier_accountability_view=build_supplier_accountability_view,
     render_supplier_accountability=render_supplier_accountability,
