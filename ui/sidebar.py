@@ -2,20 +2,11 @@
 from __future__ import annotations
 
 import inspect
-import os
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-
-# ============================================================
-# 🔓 PUBLIC REVIEW MODE (TEMP)
-# True  => bypass email allowlist gate
-# False => email allowlist enforced (if enabled)
-# ============================================================
-PUBLIC_REVIEW_MODE = False
-
 
 # ============================================================
 # Local pipeline modules (required)
@@ -38,10 +29,7 @@ except Exception as e:
 from core.ops_pack import make_daily_ops_pack_bytes
 from core.scorecards import build_supplier_scorecard_from_run, load_recent_scorecard_history
 from core.styling import add_urgency_column, style_exceptions_table, copy_button
-from core.suppliers import (
-    enrich_followups_with_suppliers,
-    add_missing_supplier_contact_exceptions,
-)
+from core.suppliers import enrich_followups_with_suppliers, add_missing_supplier_contact_exceptions
 from core.workspaces import workspace_root
 
 # Optional core imports
@@ -81,14 +69,6 @@ except Exception:
 # ============================================================
 # UI modules
 # ============================================================
-# ✅ Auth: EMAIL allowlist only (password gate removed for rewrite)
-require_email_access_gate = None
-try:
-    from ui.auth import require_email_access_gate  # type: ignore
-except Exception:
-    require_email_access_gate = None
-
-# Sidebar context (exists in your repo now)
 render_sidebar_context = None
 try:
     from ui.sidebar import render_sidebar_context  # type: ignore
@@ -106,35 +86,35 @@ except Exception:
     render_demo_editor = None
     get_active_raw_inputs = None
 
-# Upload UI (new cut)
+# Upload UI
 render_upload_section = None
 try:
     from ui.upload_ui import render_upload_section  # type: ignore
 except Exception:
     render_upload_section = None
 
-# Onboarding UI (new cut)
+# Onboarding UI
 render_onboarding_checklist = None
 try:
     from ui.onboarding_ui import render_onboarding_checklist  # type: ignore
 except Exception:
     render_onboarding_checklist = None
 
-# Templates UI (already exists)
+# Templates UI
 render_template_downloads = None
 try:
     from ui.templates import render_template_downloads  # type: ignore
 except Exception:
     render_template_downloads = None
 
-# Diagnostics UI (new cut)
+# Diagnostics UI
 render_diagnostics = None
 try:
     from ui.diagnostics_ui import render_diagnostics  # type: ignore
 except Exception:
     render_diagnostics = None
 
-# Triage UI (already created by you)
+# Triage UI
 render_ops_triage = None
 try:
     from ui.triage_ui import render_ops_triage  # type: ignore
@@ -170,35 +150,35 @@ try:
 except Exception:
     render_sla_escalations = None
 
-# Customer comms UI (optional)
+# Customer comms UI
 render_customer_comms_ui = None
 try:
     from ui.customer_comms_ui import render_customer_comms_ui  # type: ignore
 except Exception:
     render_customer_comms_ui = None
 
-# Comms pack UI (optional)
+# Comms pack UI
 render_comms_pack_download = None
 try:
     from ui.comms_pack_ui import render_comms_pack_download  # type: ignore
 except Exception:
     render_comms_pack_download = None
 
-# KPI trends UI (optional)
+# KPI trends UI
 render_kpi_trends = None
 try:
     from ui.kpi_trends_ui import render_kpi_trends  # type: ignore
 except Exception:
     render_kpi_trends = None
 
-# Daily actions UI (optional)
+# Daily actions UI
 render_daily_action_list = None
 try:
     from ui.actions_ui import render_daily_action_list  # type: ignore
 except Exception:
     render_daily_action_list = None
 
-# Supplier accountability UI (optional)
+# Supplier accountability UI
 render_supplier_accountability = None
 try:
     from ui.supplier_accountability_ui import render_supplier_accountability  # type: ignore
@@ -221,14 +201,9 @@ def _mailto_fallback(to: str, subject: str, body: str) -> str:
 
 
 # ============================================================
-# Page setup + Access gates
+# Page setup (NO ACCESS GATES RIGHT NOW)
 # ============================================================
 st.set_page_config(page_title="Dropship Hub", layout="wide")
-
-# ✅ Password gate removed. Email allowlist gate only.
-# (Disable entirely by setting PUBLIC_REVIEW_MODE=True)
-if callable(require_email_access_gate):
-    require_email_access_gate(public_review_mode=PUBLIC_REVIEW_MODE)
 
 
 # ============================================================
@@ -251,29 +226,17 @@ SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
 if callable(render_sidebar_context):
     ctx = render_sidebar_context(DATA_DIR, WORKSPACES_DIR, SUPPLIERS_DIR)
 else:
-    # minimal fallback so app still runs
     with st.sidebar:
         st.header("Tenant")
         account_id = st.text_input("account_id", value="demo_account", key="tenant_account_id")
         store_id = st.text_input("store_id", value="demo_store", key="tenant_store_id")
-        platform_hint = st.selectbox(
-            "platform hint",
-            ["shopify", "amazon", "etsy", "other"],
-            index=0,
-            key="tenant_platform_hint",
-        )
+        platform_hint = st.selectbox("platform hint", ["shopify", "amazon", "etsy", "other"], index=0, key="tenant_platform_hint")
 
         st.header("Defaults")
         default_currency = st.text_input("Default currency", value="USD", key="defaults_currency")
-        default_promised_ship_days = st.number_input(
-            "Default promised ship days (SLA)",
-            min_value=1,
-            max_value=30,
-            value=3,
-            key="defaults_sla_days",
-        )
+        default_promised_ship_days = st.number_input("Default promised ship days (SLA)", min_value=1, max_value=30, value=3, key="defaults_sla_days")
 
-        # ✅ IMPORTANT: fallback key must differ to avoid collision with ui/sidebar.py
+        # IMPORTANT: fallback key must NOT collide with sidebar's demo_mode key
         demo_mode = st.toggle("Use demo data (sticky)", key="demo_mode__fallback")
         st.session_state["demo_mode"] = bool(demo_mode)
 
@@ -311,21 +274,13 @@ diag = {
     "build_daily_action_list": build_daily_action_list is not None,
     "render_daily_action_list": render_daily_action_list is not None,
     "render_kpi_trends": render_kpi_trends is not None,
-    "build_supplier_accountability_view": build_supplier_accountability_view is not None,
-    "render_supplier_accountability": render_supplier_accountability is not None,
     "render_upload_section": render_upload_section is not None,
     "render_onboarding_checklist": render_onboarding_checklist is not None,
     "render_template_downloads": render_template_downloads is not None,
     "render_ops_triage": render_ops_triage is not None,
 }
 if callable(render_diagnostics):
-    render_diagnostics(
-        workspaces_dir=WORKSPACES_DIR,
-        account_id=account_id,
-        store_id=store_id,
-        diag=diag,
-        expanded=False,
-    )
+    render_diagnostics(workspaces_dir=WORKSPACES_DIR, account_id=account_id, store_id=store_id, diag=diag, expanded=False)
 
 
 # ============================================================
@@ -358,7 +313,6 @@ uploads = None
 if callable(render_upload_section):
     uploads = render_upload_section()
 else:
-    # fallback
     st.subheader("Upload your data")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -367,11 +321,7 @@ else:
         f_shipments = st.file_uploader("Shipments CSV (supplier export)", type=["csv"], key="uploader_shipments")
     with c3:
         f_tracking = st.file_uploader("Tracking CSV (optional)", type=["csv"], key="uploader_tracking")
-    uploads = type(
-        "U",
-        (),
-        {"f_orders": f_orders, "f_shipments": f_shipments, "f_tracking": f_tracking, "has_uploads": (f_orders is not None and f_shipments is not None)},
-    )
+    uploads = type("U", (), {"f_orders": f_orders, "f_shipments": f_shipments, "f_tracking": f_tracking, "has_uploads": (f_orders is not None and f_shipments is not None)})
 
 
 # ============================================================
@@ -393,7 +343,6 @@ if callable(get_active_raw_inputs):
         uploads.f_tracking,
     )
 else:
-    # minimal fallback
     if not (demo_mode_active or uploads.has_uploads):
         st.info("Upload Orders + Shipments, or turn on **Demo Mode (Sticky)** in the sidebar to begin.")
         st.stop()
@@ -453,11 +402,9 @@ except Exception:
 followups = enrich_followups_with_suppliers(followups, suppliers_df)
 exceptions = add_missing_supplier_contact_exceptions(exceptions, followups)
 
-# Ensure urgency exists
 if exceptions is not None and not exceptions.empty and "Urgency" not in exceptions.columns:
     exceptions = add_urgency_column(exceptions)
 
-# Scorecard
 scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
 
 
@@ -480,17 +427,14 @@ if render_sla_escalations is not None:
     except Exception:
         pass
 
-# Per-tenant issue tracker path
 ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
 ws_root.mkdir(parents=True, exist_ok=True)
 ISSUE_TRACKER_PATH = Path(ws_root) / "issue_tracker.json"
 
-# Sidebar maintenance (if UI exists)
 with st.sidebar:
     if callable(render_issue_tracker_maintenance) and (IssueTrackerStore is not None):
         render_issue_tracker_maintenance(ISSUE_TRACKER_PATH, default_prune_days=30)
 
-# Derive OPEN from FULL using issue tracker state
 if callable(derive_followups_open):
     followups_open = derive_followups_open(followups_full, ISSUE_TRACKER_PATH)
 else:
@@ -558,7 +502,6 @@ if callable(render_workspaces_sidebar_and_maybe_override_outputs):
         suppliers_df=suppliers_df if suppliers_df is not None else pd.DataFrame(),
     )
 
-    # If we loaded a run, recompute open followups again
     if callable(derive_followups_open):
         followups_open = derive_followups_open(followups, ISSUE_TRACKER_PATH)
         followups = followups_open
@@ -592,7 +535,7 @@ if render_kpi_trends is not None:
 
 
 # ============================================================
-# Ops Triage (moved out)
+# Ops Triage
 # ============================================================
 st.divider()
 if callable(render_ops_triage):
@@ -623,32 +566,11 @@ with tab1:
     if followups_for_ops is None or followups_for_ops.empty:
         st.info("No supplier follow-ups needed.")
     else:
-        summary_cols = [
-            c
-            for c in [
-                "supplier_name",
-                "supplier_email",
-                "worst_escalation",
-                "urgency",
-                "item_count",
-                "order_ids",
-                "contact_status",
-                "follow_up_count",
-            ]
-            if c in followups_for_ops.columns
-        ]
-        st.dataframe(
-            followups_for_ops[summary_cols] if summary_cols else followups_for_ops,
-            use_container_width=True,
-            height=220,
-        )
+        summary_cols = [c for c in ["supplier_name", "supplier_email", "worst_escalation", "urgency", "item_count", "order_ids", "contact_status", "follow_up_count"] if c in followups_for_ops.columns]
+        st.dataframe(followups_for_ops[summary_cols] if summary_cols else followups_for_ops, use_container_width=True, height=220)
 
         if "supplier_name" in followups_for_ops.columns and len(followups_for_ops) > 0:
-            chosen = st.selectbox(
-                "Supplier",
-                followups_for_ops["supplier_name"].tolist(),
-                key="supplier_email_preview_select",
-            )
+            chosen = st.selectbox("Supplier", followups_for_ops["supplier_name"].tolist(), key="supplier_email_preview_select")
             row = followups_for_ops[followups_for_ops["supplier_name"] == chosen].iloc[0]
 
             supplier_email = str(row.get("supplier_email", "")).strip()
@@ -688,7 +610,6 @@ with tab1:
             with c3:
                 copy_button(body, "Copy body", key=f"copy_supplier_body_{chosen}")
 
-            # One-click compose
             _ml = mailto_link if callable(mailto_link) else _mailto_fallback
             compose_url = _ml(supplier_email, subj, body)
             try:
@@ -740,7 +661,7 @@ with tab3:
 
 
 # ============================================================
-# Exceptions Queue (still in app.py)
+# Exceptions Queue
 # ============================================================
 st.divider()
 st.subheader("Exceptions Queue (Action this first)")
@@ -794,7 +715,7 @@ else:
 
 
 # ============================================================
-# Supplier Scorecards (still in app.py)
+# Supplier Scorecards
 # ============================================================
 st.divider()
 st.subheader("Supplier Scorecards (Performance + Trends)")
@@ -853,7 +774,7 @@ else:
 
 
 # ============================================================
-# SLA Escalations panel (table)
+# SLA Escalations panel
 # ============================================================
 if isinstance(escalations_df, pd.DataFrame) and not escalations_df.empty:
     st.divider()
