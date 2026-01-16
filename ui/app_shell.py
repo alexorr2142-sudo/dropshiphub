@@ -17,26 +17,37 @@ class _ShellDeps:
     render_sidebar_context: Callable[..., dict]
     render_onboarding_checklist: Optional[Callable[..., Any]]
 
-    # inputs + pipeline (sections)
+    # inputs (sections)
     render_upload_and_templates: Callable[..., Any]
     resolve_raw_inputs: Callable[..., Any]
     stop_if_missing_required_inputs: Callable[..., Any]
-    normalize_inputs: Callable[..., Any]
-    reconcile_with_debug: Callable[..., Any]
 
-    # injected pipeline callables (older app_sections expects these)
+    # pipeline runner (raw -> everything)
+    run_pipeline: Callable[..., Any]
+
+    # required pipeline callables
     normalize_orders: Callable[..., Any]
     normalize_shipments: Callable[..., Any]
     normalize_tracking: Callable[..., Any]
     reconcile_all: Callable[..., Any]
+    enhance_explanations: Callable[..., Any]
 
-    # pipeline runner
-    run_pipeline: Callable[..., Any]
+    enrich_followups_with_suppliers: Callable[..., Any]
+    add_missing_supplier_contact_exceptions: Callable[..., Any]
+    add_urgency_column: Callable[..., Any]
+    build_supplier_scorecard_from_run: Callable[..., Any]
+    make_daily_ops_pack_bytes: Callable[..., Any]
 
-    # workspaces + issue tracker path helper
-    render_workspaces_sidebar: Optional[Callable[..., Any]]
     workspace_root: Callable[..., Path]
-    issue_tracker_path_for_ws_root: Callable[..., Path]
+
+    # optional pipeline callables
+    render_sla_escalations: Optional[Callable[..., Any]]
+    apply_issue_tracker: Optional[Callable[..., Any]]
+    render_issue_tracker_maintenance: Optional[Callable[..., Any]]
+    IssueTrackerStore: Optional[Any]
+    build_customer_impact_view: Optional[Callable[..., Any]]
+    mailto_link: Optional[Callable[..., Any]]
+    render_workspaces_sidebar_and_maybe_override_outputs: Optional[Callable[..., Any]]
 
     # views
     render_dashboard: Callable[..., Any]
@@ -45,10 +56,11 @@ class _ShellDeps:
     render_supplier_scorecards: Callable[..., Any]
     render_ops_outreach_comms: Callable[..., Any]
 
-    # optional UIs
+    # optional tab UIs
     render_sla_escalations_panel: Optional[Callable[..., Any]]
     render_issue_tracker_ui: Optional[Callable[..., Any]]
     render_kpi_trends: Optional[Callable[..., Any]]
+    render_workspaces_sidebar: Optional[Callable[..., Any]]
 
     # paths init (yes, currently in core/)
     init_paths: Callable[..., tuple[Path, Path, Path, Path]]
@@ -68,25 +80,20 @@ def _call_with_accepted_kwargs(fn: Callable[..., Any], **kwargs):
 
     This keeps old/new API surfaces compatible without hiding real errors.
     """
-    # Attempt signature-based filtering
     filtered = dict(kwargs)
     try:
         sig = inspect.signature(fn)
         filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
         return fn(**filtered)
     except TypeError as e:
-        # If it already is an "unexpected keyword" error, we can recover below.
         msg = str(e)
         m = _UNEXPECTED_KW_RE.search(msg)
         if not m:
             raise
-        # fallthrough to retry loop
         filtered = dict(kwargs)
     except Exception:
-        # signature inspection failed; use retry loop below
         filtered = dict(kwargs)
 
-    # Retry loop: strip unexpected kwargs if the function complains
     max_retries = 12
     last_err: Optional[Exception] = None
     for _ in range(max_retries):
@@ -96,20 +103,36 @@ def _call_with_accepted_kwargs(fn: Callable[..., Any], **kwargs):
             msg = str(e)
             m = _UNEXPECTED_KW_RE.search(msg)
             if not m:
-                # Not an "unexpected kw" — it's a real TypeError (missing args, wrong types, etc.)
                 raise
             bad_kw = m.group(1)
             if bad_kw not in filtered:
-                # Can't fix what we can't remove; re-raise
                 raise
             filtered.pop(bad_kw, None)
             last_err = e
 
-    # If we exhausted retries, raise the last error
     if last_err:
         raise last_err
-    # Safety fallback
     return fn(**filtered)
+
+
+def _require_import(name: str, import_attempts: list[Callable[[], Any]]) -> Any:
+    """
+    Try a list of import attempt callables. If none work, stop with a clear error.
+    This avoids guessing paths silently and keeps the failure obvious.
+    """
+    last: Optional[Exception] = None
+    for attempt in import_attempts:
+        try:
+            v = attempt()
+            if v is not None:
+                return v
+        except Exception as e:
+            last = e
+
+    st.error(f"Import error: required dependency '{name}' could not be imported.")
+    if last:
+        st.code(str(last))
+    st.stop()
 
 
 def _safe_imports() -> _ShellDeps:
@@ -120,21 +143,15 @@ def _safe_imports() -> _ShellDeps:
     except Exception:
         render_onboarding_checklist = None
 
-    # Sections (uploads / normalization / reconciliation)
+    # Sections (uploads / raw input resolution)
     from ui import app_sections as sections
 
     # Pipeline runner
     from ui.app_pipeline import run_pipeline
 
-    # Workspaces + core helpers
-    try:
-        from ui.workspaces_ui import render_workspaces_sidebar
-    except Exception:
-        render_workspaces_sidebar = None
-
-    from core.workspaces import workspace_root
-    from core.issue_tracker import issue_tracker_path_for_ws_root
+    # Core paths + workspaces
     from core.paths import init_paths
+    from core.workspaces import workspace_root
 
     # Views (main tabs)
     from ui.app_views import (
@@ -145,15 +162,14 @@ def _safe_imports() -> _ShellDeps:
         render_ops_outreach_comms,
     )
 
-    # Optional views
+    # Optional tab UIs
     try:
         from ui.app_views import render_sla_escalations_panel
     except Exception:
         render_sla_escalations_panel = None
 
     try:
-        from ui.issue_tracker_ui import render_issue_tracker
-        render_issue_tracker_ui = render_issue_tracker
+        from ui.issue_tracker_ui import render_issue_tracker as render_issue_tracker_ui
     except Exception:
         render_issue_tracker_ui = None
 
@@ -162,16 +178,127 @@ def _safe_imports() -> _ShellDeps:
     except Exception:
         render_kpi_trends = None
 
-    # Core-ish callables (older sections API expects these injected)
+    # Optional workspaces sidebar (UI)
     try:
-        from normalize import normalize_orders, normalize_shipments, normalize_tracking
+        from ui.workspaces_ui import render_workspaces_sidebar
     except Exception:
-        from core.normalize import normalize_orders, normalize_shipments, normalize_tracking  # type: ignore
+        render_workspaces_sidebar = None
+
+    # ---------- Required pipeline deps ----------
+    normalize_orders = _require_import(
+        "normalize_orders",
+        [
+            lambda: __import__("normalize", fromlist=["normalize_orders"]).normalize_orders,
+            lambda: __import__("core.normalize", fromlist=["normalize_orders"]).normalize_orders,
+        ],
+    )
+    normalize_shipments = _require_import(
+        "normalize_shipments",
+        [
+            lambda: __import__("normalize", fromlist=["normalize_shipments"]).normalize_shipments,
+            lambda: __import__("core.normalize", fromlist=["normalize_shipments"]).normalize_shipments,
+        ],
+    )
+    normalize_tracking = _require_import(
+        "normalize_tracking",
+        [
+            lambda: __import__("normalize", fromlist=["normalize_tracking"]).normalize_tracking,
+            lambda: __import__("core.normalize", fromlist=["normalize_tracking"]).normalize_tracking,
+        ],
+    )
+    reconcile_all = _require_import(
+        "reconcile_all",
+        [
+            lambda: __import__("reconcile", fromlist=["reconcile_all"]).reconcile_all,
+            lambda: __import__("core.reconcile", fromlist=["reconcile_all"]).reconcile_all,
+        ],
+    )
+    enhance_explanations = _require_import(
+        "enhance_explanations",
+        [
+            lambda: __import__("explain", fromlist=["enhance_explanations"]).enhance_explanations,
+            lambda: __import__("core.explain", fromlist=["enhance_explanations"]).enhance_explanations,
+        ],
+    )
+
+    # The rest are required by run_pipeline() but project paths vary.
+    # We try common locations; if missing, we stop with a clear message.
+    enrich_followups_with_suppliers = _require_import(
+        "enrich_followups_with_suppliers",
+        [
+            lambda: __import__("core.followups", fromlist=["enrich_followups_with_suppliers"]).enrich_followups_with_suppliers,
+            lambda: __import__("followups", fromlist=["enrich_followups_with_suppliers"]).enrich_followups_with_suppliers,
+        ],
+    )
+    add_missing_supplier_contact_exceptions = _require_import(
+        "add_missing_supplier_contact_exceptions",
+        [
+            lambda: __import__("core.followups", fromlist=["add_missing_supplier_contact_exceptions"]).add_missing_supplier_contact_exceptions,
+            lambda: __import__("followups", fromlist=["add_missing_supplier_contact_exceptions"]).add_missing_supplier_contact_exceptions,
+        ],
+    )
+    add_urgency_column = _require_import(
+        "add_urgency_column",
+        [
+            lambda: __import__("core.urgency", fromlist=["add_urgency_column"]).add_urgency_column,
+            lambda: __import__("urgency", fromlist=["add_urgency_column"]).add_urgency_column,
+        ],
+    )
+    build_supplier_scorecard_from_run = _require_import(
+        "build_supplier_scorecard_from_run",
+        [
+            lambda: __import__("core.supplier_scorecards", fromlist=["build_supplier_scorecard_from_run"]).build_supplier_scorecard_from_run,
+            lambda: __import__("supplier_scorecards", fromlist=["build_supplier_scorecard_from_run"]).build_supplier_scorecard_from_run,
+            lambda: __import__("core.supplier_accountability", fromlist=["build_supplier_scorecard_from_run"]).build_supplier_scorecard_from_run,
+        ],
+    )
+    make_daily_ops_pack_bytes = _require_import(
+        "make_daily_ops_pack_bytes",
+        [
+            lambda: __import__("core.ops_pack", fromlist=["make_daily_ops_pack_bytes"]).make_daily_ops_pack_bytes,
+            lambda: __import__("ops_pack", fromlist=["make_daily_ops_pack_bytes"]).make_daily_ops_pack_bytes,
+            lambda: __import__("core.packs", fromlist=["make_daily_ops_pack_bytes"]).make_daily_ops_pack_bytes,
+        ],
+    )
+
+    # ---------- Optional pipeline deps ----------
+    try:
+        from ui.sla_escalations_ui import render_sla_escalations  # type: ignore
+    except Exception:
+        render_sla_escalations = None
 
     try:
-        from reconcile import reconcile_all
+        from core.issue_tracker import IssueTrackerStore  # type: ignore
     except Exception:
-        from core.reconcile import reconcile_all  # type: ignore
+        IssueTrackerStore = None
+
+    try:
+        from core.customer_impact import build_customer_impact_view  # type: ignore
+    except Exception:
+        build_customer_impact_view = None
+
+    # Optional issue tracker integration hook (if your repo has it)
+    try:
+        from core.issue_tracker_apply import apply_issue_tracker  # type: ignore
+    except Exception:
+        apply_issue_tracker = None
+
+    try:
+        from ui.issue_tracker_maintenance_ui import render_issue_tracker_maintenance  # type: ignore
+    except Exception:
+        render_issue_tracker_maintenance = None
+
+    # Optional mailto helper (if present)
+    try:
+        from ui.app_sections import mailto_fallback as mailto_link  # type: ignore
+    except Exception:
+        mailto_link = None
+
+    # Optional workspaces override hook (if present)
+    try:
+        from ui.workspaces_ui import render_workspaces_sidebar_and_maybe_override_outputs  # type: ignore
+    except Exception:
+        render_workspaces_sidebar_and_maybe_override_outputs = None
 
     return _ShellDeps(
         render_sidebar_context=render_sidebar_context,
@@ -179,17 +306,25 @@ def _safe_imports() -> _ShellDeps:
         render_upload_and_templates=sections.render_upload_and_templates,
         resolve_raw_inputs=sections.resolve_raw_inputs,
         stop_if_missing_required_inputs=sections.stop_if_missing_required_inputs,
-        normalize_inputs=sections.normalize_inputs,
-        reconcile_with_debug=sections.reconcile_with_debug,
+        run_pipeline=run_pipeline,
         normalize_orders=normalize_orders,
         normalize_shipments=normalize_shipments,
         normalize_tracking=normalize_tracking,
         reconcile_all=reconcile_all,
-        run_pipeline=run_pipeline,
-        render_workspaces_sidebar=render_workspaces_sidebar,
+        enhance_explanations=enhance_explanations,
+        enrich_followups_with_suppliers=enrich_followups_with_suppliers,
+        add_missing_supplier_contact_exceptions=add_missing_supplier_contact_exceptions,
+        add_urgency_column=add_urgency_column,
+        build_supplier_scorecard_from_run=build_supplier_scorecard_from_run,
+        make_daily_ops_pack_bytes=make_daily_ops_pack_bytes,
         workspace_root=workspace_root,
-        issue_tracker_path_for_ws_root=issue_tracker_path_for_ws_root,
-        init_paths=init_paths,
+        render_sla_escalations=render_sla_escalations,
+        apply_issue_tracker=apply_issue_tracker,
+        render_issue_tracker_maintenance=render_issue_tracker_maintenance,
+        IssueTrackerStore=IssueTrackerStore,
+        build_customer_impact_view=build_customer_impact_view,
+        mailto_link=mailto_link,
+        render_workspaces_sidebar_and_maybe_override_outputs=render_workspaces_sidebar_and_maybe_override_outputs,
         render_dashboard=render_dashboard,
         render_ops_triage=render_ops_triage,
         render_exceptions_queue_section=render_exceptions_queue_section,
@@ -198,6 +333,8 @@ def _safe_imports() -> _ShellDeps:
         render_sla_escalations_panel=render_sla_escalations_panel,
         render_issue_tracker_ui=render_issue_tracker_ui,
         render_kpi_trends=render_kpi_trends,
+        render_workspaces_sidebar=render_workspaces_sidebar,
+        init_paths=init_paths,
     )
 
 
@@ -244,123 +381,59 @@ def render_app() -> None:
         st.code(str(e))
         uploads = None
 
-    # Raw inputs (demo-safe) — support both old/new sections signatures via accepted-kwargs
+    # Raw inputs (demo-safe)
     raw_orders, raw_shipments, raw_tracking = _call_with_accepted_kwargs(
         deps.resolve_raw_inputs,
         demo_mode_active=demo_mode,
-        demo_mode=demo_mode,
         data_dir=data_dir,
         uploads=uploads,
-        uploaded_orders=getattr(uploads, "f_orders", None),
-        uploaded_shipments=getattr(uploads, "f_shipments", None),
-        uploaded_tracking=getattr(uploads, "f_tracking", None),
     )
 
-    # Stop if required inputs are missing (unless demo) — tolerate both signatures
+    # Stop if required inputs are missing (unless demo)
     _call_with_accepted_kwargs(
         deps.stop_if_missing_required_inputs,
         raw_orders=raw_orders,
         raw_shipments=raw_shipments,
         raw_tracking=raw_tracking,
-        orders_df=raw_orders,
-        shipments_df=raw_shipments,
-        demo_mode=demo_mode,
-        demo_mode_active=demo_mode,
     )
 
-    # Normalize — sections API expects injected normalize_* callables (older style)
-    orders, shipments, tracking, _meta = _call_with_accepted_kwargs(
-        deps.normalize_inputs,
+    # Run the REAL pipeline (raw -> normalize -> reconcile -> artifacts)
+    pipe = deps.run_pipeline(
         raw_orders=raw_orders,
         raw_shipments=raw_shipments,
         raw_tracking=raw_tracking,
-        normalize_orders=deps.normalize_orders,
-        normalize_shipments=deps.normalize_shipments,
-        normalize_tracking=deps.normalize_tracking,
         account_id=account_id,
         store_id=store_id,
         platform_hint=platform_hint,
         default_currency=default_currency,
         default_promised_ship_days=promised_days,
-        promised_ship_days=promised_days,
-    )
-
-    # Reconcile — sections API expects injected reconcile_all (older style)
-    line_status_df, exceptions, followups_full, order_rollup, kpis = _call_with_accepted_kwargs(
-        deps.reconcile_with_debug,
-        orders=orders,
-        shipments=shipments,
-        tracking=tracking,
+        suppliers_df=suppliers_df,
+        workspaces_dir=workspaces_dir,
+        normalize_orders=deps.normalize_orders,
+        normalize_shipments=deps.normalize_shipments,
+        normalize_tracking=deps.normalize_tracking,
         reconcile_all=deps.reconcile_all,
-        platform_hint=platform_hint,
-        default_currency=default_currency,
-        promised_ship_days=promised_days,
-        suppliers_df=suppliers_df,
+        enhance_explanations=deps.enhance_explanations,
+        enrich_followups_with_suppliers=deps.enrich_followups_with_suppliers,
+        add_missing_supplier_contact_exceptions=deps.add_missing_supplier_contact_exceptions,
+        add_urgency_column=deps.add_urgency_column,
+        build_supplier_scorecard_from_run=deps.build_supplier_scorecard_from_run,
+        make_daily_ops_pack_bytes=deps.make_daily_ops_pack_bytes,
+        workspace_root=deps.workspace_root,
+        render_sla_escalations=deps.render_sla_escalations,
+        apply_issue_tracker=deps.apply_issue_tracker,
+        render_issue_tracker_maintenance=deps.render_issue_tracker_maintenance,
+        IssueTrackerStore=deps.IssueTrackerStore,
+        build_customer_impact_view=deps.build_customer_impact_view,
+        mailto_link=deps.mailto_link,
+        render_workspaces_sidebar_and_maybe_override_outputs=deps.render_workspaces_sidebar_and_maybe_override_outputs,
     )
 
-    # Issue tracker path is per-tenant
-    ws_root = deps.workspace_root(workspaces_dir, account_id, store_id)
-    issue_tracker_path = deps.issue_tracker_path_for_ws_root(ws_root)
-
-    # Pipeline (customer impact, scorecards, escalations, mailto packs, etc.)
-    pipe = _call_with_accepted_kwargs(
-        deps.run_pipeline,
-        account_id=account_id,
-        store_id=store_id,
-        platform_hint=platform_hint,
-        default_currency=default_currency,
-        promised_ship_days=promised_days,
-        suppliers_df=suppliers_df,
-        orders=orders,
-        shipments=shipments,
-        tracking=tracking,
-        exceptions=exceptions,
-        followups_full=followups_full,
-        order_rollup=order_rollup,
-        kpis=kpis,
-        line_status_df=line_status_df,
-        issue_tracker_path=issue_tracker_path,
-    )
-
-    # Optional: workspaces sidebar (save/load) can override what we show
     view = dict(pipe) if isinstance(pipe, dict) else {}
-    view.setdefault("exceptions", exceptions)
-    view.setdefault("followups_open", followups_full)
-    view.setdefault("order_rollup", order_rollup)
-    view.setdefault("kpis", kpis)
-    view.setdefault("line_status_df", line_status_df)
 
-    if callable(deps.render_workspaces_sidebar):
-        try:
-            ws_result = _call_with_accepted_kwargs(
-                deps.render_workspaces_sidebar,
-                workspaces_dir=workspaces_dir,
-                account_id=account_id,
-                store_id=store_id,
-                platform_hint=platform_hint,
-                default_currency=default_currency,
-                promised_ship_days=promised_days,
-                suppliers_df=suppliers_df,
-                orders=orders,
-                shipments=shipments,
-                tracking=tracking,
-                exceptions=view.get("exceptions", pd.DataFrame()),
-                followups_full=view.get("followups_full", followups_full),
-                followups_open=view.get("followups_open", pd.DataFrame()),
-                order_rollup=view.get("order_rollup", pd.DataFrame()),
-                line_status_df=view.get("line_status_df", pd.DataFrame()),
-                kpis=view.get("kpis", {}),
-            )
-            if getattr(ws_result, "loaded_run_dir", None):
-                view["exceptions"] = ws_result.exceptions
-                view["followups_open"] = ws_result.followups
-                view["order_rollup"] = ws_result.order_rollup
-                view["line_status_df"] = ws_result.line_status_df
-                view["kpis"] = ws_result.kpis
-                view["suppliers_df"] = ws_result.suppliers_df
-        except Exception as e:
-            st.warning("Workspaces sidebar failed (non-critical).")
-            st.code(str(e))
+    # Backward-compat mapping for UI expectations
+    if "supplier_scorecards" not in view and "scorecard" in view:
+        view["supplier_scorecards"] = view.get("scorecard", pd.DataFrame())
 
     # ---------- Main tabs ----------
     tabs = st.tabs(
@@ -409,10 +482,16 @@ def render_app() -> None:
         if callable(deps.render_sla_escalations_panel):
             deps.render_sla_escalations_panel(escalations_df=view.get("escalations_df", pd.DataFrame()))
         else:
-            st.caption("SLA escalations UI not available.")
+            # Fail-safe fallback (do not crash if optional UI is missing)
+            df = view.get("escalations_df", pd.DataFrame())
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.caption("SLA escalations UI not available.")
 
     with tabs[6]:
-        if callable(deps.render_issue_tracker_ui):
+        issue_tracker_path = view.get("issue_tracker_path", None)
+        if callable(deps.render_issue_tracker_ui) and issue_tracker_path:
             deps.render_issue_tracker_ui(issue_tracker_path=issue_tracker_path)
         else:
             st.caption("Follow-up tracker UI not available.")
