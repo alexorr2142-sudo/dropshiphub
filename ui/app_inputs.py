@@ -17,36 +17,41 @@ def render_start_here(
     render_demo_editor: Optional[Callable[..., Any]] = None,
 ) -> None:
     st.subheader("Start here")
+
+    # Demo state should be initialized early so the rest of the app can run safely
     if callable(ensure_demo_state):
         ensure_demo_state(data_dir)
+
+    # If the demo editor exists, let it own this section
     if callable(render_demo_editor):
         render_demo_editor()
         return
 
     if demo_mode_active:
-        st.info("Demo mode is ON but demo editor UI module is not available.")
+        st.info("ClearOps Demo is ON, but the demo editor UI module is not available.")
     else:
-        st.info("Turn on **Demo Mode (Sticky)** in the sidebar to play with demo data (edits persist).")
+        st.info("Turn on **ClearOps Demo (Sticky)** in the sidebar to explore demo data (edits persist).")
 
 
 def render_upload_section_fallback():
     st.subheader("Upload your data")
+    st.caption("Upload Orders + Shipments to run ClearOps. Tracking is optional.")
     c1, c2, c3 = st.columns(3)
     with c1:
         f_orders = st.file_uploader(
-            "Orders CSV (Shopify export or generic)",
+            "Orders CSV (platform export or generic)",
             type=["csv"],
             key="uploader_orders",
         )
     with c2:
         f_shipments = st.file_uploader(
-            "Shipments CSV (supplier export)",
+            "Shipments CSV (supplier / 3PL export)",
             type=["csv"],
             key="uploader_shipments",
         )
     with c3:
         f_tracking = st.file_uploader(
-            "Tracking CSV\n(optional)",
+            "Tracking CSV (optional)",
             type=["csv"],
             key="uploader_tracking",
         )
@@ -104,7 +109,7 @@ def resolve_raw_inputs(
         )
 
     if not (demo_mode_active or uploads.has_uploads):
-        st.info("Upload Orders + Shipments, or turn on **Demo Mode (Sticky)** in the sidebar to begin.")
+        st.info("Upload Orders + Shipments, or turn on **ClearOps Demo (Sticky)** in the sidebar to begin.")
         st.stop()
 
     if demo_mode_active:
