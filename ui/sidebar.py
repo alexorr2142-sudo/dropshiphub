@@ -6,7 +6,13 @@ import pandas as pd
 import streamlit as st
 
 from core.suppliers import load_suppliers, save_suppliers
-from ui.demo import reset_demo, clear_demo
+
+# Demo helpers (robust import; won't crash sidebar if demo module changes)
+try:
+    from ui.demo import reset_demo, clear_demo  # type: ignore
+except Exception:
+    reset_demo = None
+    clear_demo = None
 
 
 def render_sidebar_context(
@@ -102,15 +108,25 @@ def render_sidebar_context(
 
         if demo_mode:
             c1, c2 = st.columns(2)
+
             with c1:
                 if st.button("Reset demo", use_container_width=True, key=f"{key_prefix}_demo_reset"):
-                    reset_demo(data_dir)
-                    st.success("Demo reset ✅")
-                    st.rerun()
+                    if callable(reset_demo):
+                        reset_demo(data_dir)
+                        st.success("Demo reset ✅")
+                        st.rerun()
+                    else:
+                        st.warning("reset_demo() not available. Check ui/demo.py exports.")
+
             with c2:
                 if st.button("Clear demo", use_container_width=True, key=f"{key_prefix}_demo_clear"):
                     st.session_state["demo_mode"] = False
-                    clear_demo()
+                    if callable(clear_demo):
+                        clear_demo()
+                    else:
+                        # safe fallback: just remove demo frames if present
+                        for k in ["demo_raw_orders", "demo_raw_shipments", "demo_raw_tracking"]:
+                            st.session_state.pop(k, None)
                     st.rerun()
 
         # ----------------
@@ -157,8 +173,7 @@ def render_sidebar_context(
         st.divider()
         st.header("Supplier Directory (CRM)")
 
-        # IMPORTANT:
-        # This key is global intentionally so the dataframe persists and can be used elsewhere.
+        # Persist supplier directory across reruns
         if "suppliers_df" not in st.session_state:
             st.session_state["suppliers_df"] = load_suppliers(suppliers_dir, account_id, store_id)
 
