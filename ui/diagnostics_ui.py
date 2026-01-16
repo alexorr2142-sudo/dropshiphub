@@ -13,20 +13,23 @@ def render_diagnostics(
     account_id: str,
     store_id: str,
     diag: dict,
-    title: str = "Diagnostics",
+    title: str = "ClearOps Diagnostics",
     expanded: bool = False,
 ) -> None:
     """
     Renders the diagnostics expander:
       - bool flags for optional modules/features
-      - ws_root path
+      - workspace root path
       - saved run count
+
+    This panel is intended for troubleshooting and verification only.
     """
     with st.expander(title, expanded=expanded):
+        st.caption("System health and optional feature availability.")
         st.json(diag)
 
         ws_root_diag = workspace_root(workspaces_dir, account_id, store_id)
-        st.write(f"ws_root: `{ws_root_diag.as_posix()}`")
+        st.write(f"workspace root: `{ws_root_diag.as_posix()}`")
         try:
             st.write(f"saved runs: {len(list_runs(ws_root_diag))}")
         except Exception:
