@@ -167,7 +167,7 @@ class IssueTrackerStore:
                         "next_action_at": rec.get("next_action_at", None),
                     },
                     sort_keys=True,
-                    default=str,
+                   default=str,
                 )
                 if before != after:
                     data[k] = rec
@@ -192,23 +192,39 @@ class IssueTrackerStore:
 
     def _log_event(
         self,
-        *,
-        event_type: str,
-        summary: str,
-        issue_id: str,
+        *args,
+        event_type: str = "",
+        summary: str = "",
+        issue_id: str = "",
         data: Optional[Dict[str, Any]] = None,
         actor: str = "user",
     ) -> None:
+        """
+        Backward-compatible logger:
+          - supports calling as _log_event(event_type, summary, issue_id=..., data=...)
+          - supports calling as _log_event(event_type="...", summary="...", issue_id="...")
+        Never raises.
+        """
+        # Allow positional usage: (event_type, summary)
+        try:
+            if args:
+                if len(args) >= 1 and not event_type:
+                    event_type = str(args[0] or "")
+                if len(args) >= 2 and not summary:
+                    summary = str(args[1] or "")
+        except Exception:
+            pass
+
         tl = self._timeline()
         if tl is None:
             return
         try:
             tl.log(
                 scope="issue",
-                event_type=event_type,
-                summary=summary,
+                event_type=str(event_type or ""),
+                summary=str(summary or ""),
                 issue_id=str(issue_id or ""),
-                actor=actor,
+                actor=str(actor or "user"),
                 data=data or {},
             )
         except Exception:
