@@ -13,6 +13,7 @@ from ui.issue_tracker_ui import (
     enrich_followups_with_contact_fields,
     enrich_followups_with_issue_fields,
 )
+from ui.timeline_ui import render_timeline_panel
 
 ISSUE_STATUSES = ["Open", "Waiting", "Resolved"]
 
@@ -60,6 +61,9 @@ def render_supplier_followups_tab(
     Adds (Feature #3: Ownership & Follow-Through):
       - owner / issue_status / next_action_at shown in preview
       - bulk set owner / issue status / next action for selected supplier's issues
+
+    Adds (Feature #1: Timeline visibility):
+      - Shows recent timeline events for the selected supplier’s issues
     """
     st.caption("Supplier-facing outreach based on OPEN follow-ups (unresolved only).")
 
@@ -292,7 +296,11 @@ def render_supplier_followups_tab(
             st.rerun()
 
     with b2:
-        if st.button("💾 Save issue status", use_container_width=True, key=f"{key_prefix}_btn_issue_status_save_{chosen}"):
+        if st.button(
+            "💾 Save issue status",
+            use_container_width=True,
+            key=f"{key_prefix}_btn_issue_status_save_{chosen}",
+        ):
             saved = 0
             for iid in issue_ids:
                 try:
@@ -310,7 +318,11 @@ def render_supplier_followups_tab(
             st.rerun()
 
     with b3:
-        if st.button("💾 Save next action", use_container_width=True, key=f"{key_prefix}_btn_next_action_save_{chosen}"):
+        if st.button(
+            "💾 Save next action",
+            use_container_width=True,
+            key=f"{key_prefix}_btn_next_action_save_{chosen}",
+        ):
             saved = 0
             for iid in issue_ids:
                 try:
@@ -353,3 +365,23 @@ def render_supplier_followups_tab(
         except Exception as e:
             st.warning("Supplier accountability failed to render.")
             st.code(str(e))
+
+    # ----------------------------
+    # Timeline (optional, fail-safe)
+    # ----------------------------
+    try:
+        from core.timeline_store import timeline_path_for_issue_tracker_path
+
+        timeline_path = timeline_path_for_issue_tracker_path(issue_tracker_path)
+
+        render_timeline_panel(
+            timeline_path=timeline_path,
+            title="🕒 Recent Timeline Events (for this supplier’s issues)",
+            issue_ids=issue_ids,  # tight filter
+            supplier_name="",  # issue_ids already filters tightly
+            limit=200,
+            key_prefix=f"{key_prefix}_timeline_{chosen}",
+        )
+    except Exception:
+        # Optional feature must never break the app
+        pass
