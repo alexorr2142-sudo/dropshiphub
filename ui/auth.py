@@ -26,6 +26,23 @@ def get_allowed_emails() -> list[str]:
     return sorted(set(allowed + allowed_env))
 
 
+# -------------------------------------------------
+# Backward-compatible wrapper (so app.py imports work)
+# -------------------------------------------------
+def early_access_gate(access_code: str):
+    """
+    Compatibility wrapper for older app.py imports:
+      from ui.auth import early_access_gate
+
+    Uses the same widget key as the newer gate to avoid duplicates.
+    """
+    st.subheader("Early access")
+    code = st.text_input("Enter early access code", type="password", key="auth_access_code")
+    if code != (access_code or ""):
+        st.info("This app is currently in early access. Enter your code to continue.")
+        st.stop()
+
+
 def require_early_access_code_gate(
     *,
     public_review_mode: bool = False,
