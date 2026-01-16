@@ -330,7 +330,7 @@ else:
         )
     with c3:
         f_tracking = st.file_uploader(
-            "Tracking CSV (optional)",
+            "Tracking CSV\n(optional)",  # ✅ wrap to keep boxes aligned in split-screen
             type=["csv"],
             key="uploader_tracking",
         )
@@ -854,7 +854,14 @@ else:
     with sc1:
         top_n = st.slider("Show top N suppliers", min_value=5, max_value=50, value=15, step=5, key="scorecard_top_n")
     with sc2:
-        min_lines = st.number_input("Min total lines", min_value=1, max_value=1000000, value=1, step=1, key="scorecard_min_lines")
+        min_lines = st.number_input(
+            "Min total lines",
+            min_value=1,
+            max_value=1000000,
+            value=1,
+            step=1,
+            key="scorecard_min_lines",
+        )
 
     view = scorecard[scorecard["total_lines"] >= int(min_lines)].head(int(top_n))
 
