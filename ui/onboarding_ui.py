@@ -10,6 +10,33 @@ def render_onboarding_checklist(
     expanded: bool = True,
 ) -> None:
     with st.expander(title, expanded=expanded):
+        # ---------------------------------
+        # What is ClearOps?
+        # ---------------------------------
+        st.markdown(
+            """
+### What is ClearOps?
+
+**ClearOps** gives you operational clarity by turning messy order, shipment,
+and tracking data into **clear exceptions, follow-ups, and actions**.
+
+It helps teams:
+- See what’s broken (and why)
+- Prioritize Critical and High-risk issues
+- Track supplier follow-ups
+- Communicate proactively with customers
+- Build trend history over time
+
+You can explore everything instantly using **ClearOps Demo**, or upload
+your own CSVs to run against real data.
+            """.strip()
+        )
+
+        st.divider()
+
+        # ---------------------------------
+        # Onboarding checklist
+        # ---------------------------------
         st.markdown(
             """
 1. Enter **Early Access Code**  
