@@ -9,6 +9,12 @@ import streamlit as st
 from core.suppliers import load_suppliers, save_suppliers
 from ui.demo_health import render_demo_health_badge
 
+# Best-effort import: sidebar can pre-load demo state so the health badge is accurate
+try:
+    from ui.demo import ensure_demo_state  # type: ignore
+except Exception:
+    ensure_demo_state = None
+
 
 def render_sidebar_context(
     data_dir: Path,
@@ -113,7 +119,16 @@ def render_sidebar_context(
         except Exception:
             st.session_state["app_demo_mode"] = demo_mode_bool
 
-        # NEW: Demo health badge (no app.py changes)
+        # Ensure demo state is initialized BEFORE rendering the health badge
+        # (otherwise the badge can show BROKEN on the first rerun)
+        if demo_mode_bool and callable(ensure_demo_state):
+            try:
+                ensure_demo_state(data_dir)
+            except Exception:
+                # Never let demo preload break the sidebar
+                pass
+
+        # Demo health badge
         render_demo_health_badge(data_dir)
 
         # ----------------
