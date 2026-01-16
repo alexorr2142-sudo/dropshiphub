@@ -38,12 +38,14 @@ def render_dashboard(
             actions = build_daily_action_list(exceptions=exceptions, followups=followups_open, max_items=10)
             render_daily_action_list(actions)
         except Exception:
+            # Optional UI must never break the app
             pass
 
     if callable(render_kpi_trends):
         try:
             render_kpi_trends(workspaces_dir=workspaces_dir, account_id=account_id, store_id=store_id)
         except Exception:
+            # Optional UI must never break the app
             pass
 
 
@@ -53,21 +55,50 @@ def render_ops_triage(
     ops_pack_bytes: bytes,
     pack_name: str,
     style_exceptions_table: Optional[Callable[..., Any]] = None,
-    render_ops_triage: Optional[Callable[..., Any]] = None,
+    render_ops_triage_component: Optional[Callable[..., Any]] = None,
 ) -> None:
+    """
+    "Start here" ops triage section.
+
+    This is a thin wrapper that prefers a dedicated triage component when provided.
+    IMPORTANT: the injected renderer is named `render_ops_triage_component` to avoid
+    shadowing this wrapper function (and causing accidental recursion / TypeErrors).
+    """
     st.divider()
-    if callable(render_ops_triage):
-        render_ops_triage(exceptions, ops_pack_bytes, pack_name, top_n=10)
-        return
+
+    if callable(render_ops_triage_component):
+        try:
+            # Most triage components use positional args + optional top_n
+            render_ops_triage_component(exceptions, ops_pack_bytes, pack_name, top_n=10)
+            return
+        except TypeError:
+            # Some components may be kwargs-only
+            call_with_accepted_kwargs(
+                render_ops_triage_component,
+                exceptions=exceptions,
+                ops_pack_bytes=ops_pack_bytes,
+                pack_name=pack_name,
+                top_n=10,
+            )
+            return
+        except Exception:
+            # Optional component must not crash the app; fall back to simple view
+            st.warning("Ops triage module had an issue; showing basic triage view instead.")
 
     st.subheader("Ops Triage (Start here)")
     if exceptions is None or exceptions.empty:
         st.info("No exceptions found 🎉")
-    else:
-        if callable(style_exceptions_table):
-            st.dataframe(style_exceptions_table(exceptions.head(10)), use_container_width=True, height=320)
-        else:
-            st.dataframe(exceptions.head(10), use_container_width=True, height=320)
+        return
+
+    view = exceptions.head(10)
+    if callable(style_exceptions_table):
+        try:
+            st.dataframe(style_exceptions_table(view), use_container_width=True, height=320)
+            return
+        except Exception:
+            pass
+
+    st.dataframe(view, use_container_width=True, height=320)
 
 
 def render_ops_outreach_comms(
@@ -175,18 +206,28 @@ def render_exceptions_queue_section(
     fcol1, fcol2, fcol3, fcol4 = st.columns(4)
 
     with fcol1:
-        issue_types = sorted(exceptions["issue_type"].dropna().unique().tolist()) if "issue_type" in exceptions.columns else []
+        issue_types = (
+            sorted(exceptions["issue_type"].dropna().unique().tolist()) if "issue_type" in exceptions.columns else []
+        )
         issue_filter = st.multiselect("Issue types", issue_types, default=issue_types, key="exq_issue_types")
 
     with fcol2:
         countries = sorted(
-            [c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist() if str(c).strip() != ""]
+            [
+                c
+                for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist()
+                if str(c).strip() != ""
+            ]
         )
         country_filter = st.multiselect("Customer country", countries, default=countries, key="exq_countries")
 
     with fcol3:
         suppliers = sorted(
-            [s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist() if str(s).strip() != ""]
+            [
+                s
+                for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist()
+                if str(s).strip() != ""
+            ]
         )
         supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers, key="exq_suppliers")
 
