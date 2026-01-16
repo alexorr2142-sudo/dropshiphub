@@ -46,7 +46,7 @@ def render_sidebar_context(
                 """
 **Early Access (Free)**
 - CSV uploads
-- Exceptions + supplier follow-ups
+- Exceptions + follow-ups
 - Supplier Directory (CRM)
 - Supplier scorecards
 
@@ -104,12 +104,12 @@ def render_sidebar_context(
         # Demo Mode (Sticky)
         # ----------------
         st.divider()
-        st.header("Demo Mode (Sticky)")
+        st.header("ClearOps Demo (Sticky)")
 
         demo_mode = st.toggle(
             "Use demo data (sticky)",
             key=f"{key_prefix}_demo_mode",
-            help="Keeps demo data and your edits across interactions until you turn it off.",
+            help="Runs ClearOps with built-in demo data (and your edits) until you turn it off.",
         )
 
         # Keep a canonical boolean in session_state for other modules to read safely
@@ -163,7 +163,7 @@ def render_sidebar_context(
         with st.expander("View Supplier Directory", expanded=False):
             suppliers_df_preview = st.session_state.get(cache_key, pd.DataFrame())
             if suppliers_df_preview is None or suppliers_df_preview.empty:
-                st.caption("No supplier directory loaded yet. Upload suppliers.csv to auto-fill follow-up emails.")
+                st.caption("No supplier directory loaded yet. Upload suppliers.csv to auto-fill follow-ups.")
             else:
                 show_cols = [
                     c
@@ -186,7 +186,7 @@ def render_sidebar_context(
                     )
                     st.caption(f"Missing supplier_email: {int(missing_emails)} row(s)")
 
-        st.caption("Tip: Upload suppliers.csv once per account/store to auto-fill follow-up emails.")
+        st.caption("Tip: Upload suppliers.csv once per account/store to auto-fill follow-ups.")
 
     suppliers_df = st.session_state.get(f"{key_prefix}_suppliers_df_cache", pd.DataFrame())
 
