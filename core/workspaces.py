@@ -176,6 +176,90 @@ def save_raw_inputs_snapshot(
     return run_dir
 
 
+# ------------------------------
+# NEW: Convert RAW snapshot -> full run (safe, additive)
+# ------------------------------
+def convert_raw_snapshot_to_full_run(
+    *,
+    ws_root: Path,
+    snapshot_dir: Path,
+    target_workspace_name: str,
+    account_id: str,
+    store_id: str,
+    platform_hint: str = "",
+    note: str = "",
+) -> tuple[Path | None, str | None]:
+    """
+    Converts a RAW snapshot folder (containing raw_orders.csv/raw_shipments.csv[/raw_tracking.csv])
+    into a standard "full run" folder by reusing existing save_run().
+
+    IMPORTANT:
+      - This does not attempt to run the pipeline. It preserves RAW inputs by storing them into
+        the "normalized" slots (orders_normalized.csv, etc.) so the run is loadable everywhere.
+      - All other run outputs are saved as empty DataFrames (exceptions/followups/etc.) to keep
+        backward compatibility and avoid crashes.
+
+    Returns:
+      (new_run_dir | None, error_message | None)
+    """
+    try:
+        snapshot_dir = Path(snapshot_dir)
+        if not snapshot_dir.exists() or not snapshot_dir.is_dir():
+            return None, f"Snapshot folder not found: {snapshot_dir.as_posix()}"
+
+        raw_orders_path = snapshot_dir / "raw_orders.csv"
+        raw_shipments_path = snapshot_dir / "raw_shipments.csv"
+        raw_tracking_path = snapshot_dir / "raw_tracking.csv"
+
+        missing = [p.name for p in [raw_orders_path, raw_shipments_path] if not p.exists()]
+        if missing:
+            return None, "Snapshot missing required file(s): " + ", ".join(missing)
+
+        raw_orders = pd.read_csv(raw_orders_path)
+        raw_shipments = pd.read_csv(raw_shipments_path)
+        raw_tracking = pd.read_csv(raw_tracking_path) if raw_tracking_path.exists() else pd.DataFrame()
+
+        # Save as a standard run with empty outputs (safe placeholders)
+        empty = pd.DataFrame()
+        run_dir = save_run(
+            ws_root=ws_root,
+            workspace_name=target_workspace_name,
+            account_id=account_id,
+            store_id=store_id,
+            platform_hint=platform_hint or "",
+            orders=raw_orders,
+            shipments=raw_shipments,
+            tracking=raw_tracking,
+            exceptions=empty,
+            followups=empty,
+            order_rollup=empty,
+            line_status_df=empty,
+            kpis={},
+            suppliers_df=empty,
+        )
+
+        # Enrich meta to indicate conversion provenance (non-breaking)
+        try:
+            meta_path = run_dir / "meta.json"
+            meta = {}
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta = meta or {}
+            meta["source"] = "converted_from_raw_snapshot"
+            meta["source_snapshot_dir"] = snapshot_dir.as_posix()
+            if note:
+                meta["note"] = note
+            (run_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        except Exception:
+            # non-critical
+            pass
+
+        return run_dir, None
+
+    except Exception as e:
+        return None, str(e)
+
+
 def load_run(run_dir: Path) -> dict:
     out = {"meta": {}}
     meta_path = run_dir / "meta.json"
