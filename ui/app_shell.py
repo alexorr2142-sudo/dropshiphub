@@ -157,8 +157,21 @@ def render_app() -> None:
         except Exception:
             st.warning("Onboarding checklist failed to render (non-critical).")
 
-    # Uploads + templates
-    files = deps.render_upload_and_templates()
+    # Uploads + templates (must fail-safe; demo must still run)
+    files: Dict[str, Any] = {}
+    try:
+        maybe_files = deps.render_upload_and_templates()
+        if maybe_files is None:
+            files = {}
+        elif isinstance(maybe_files, dict):
+            files = maybe_files
+        else:
+            st.warning("Uploads UI returned an unexpected type; proceeding without uploads (non-critical).")
+            files = {}
+    except Exception as e:
+        st.warning("Uploads / templates UI failed; proceeding without uploads (non-critical).")
+        st.code(str(e))
+        files = {}
 
     # Raw inputs (demo-safe)
     raw_orders, raw_shipments, raw_tracking = deps.resolve_raw_inputs(
