@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -30,6 +30,26 @@ class WorkspacesResult:
     order_rollup: Optional[pd.DataFrame] = None
     line_status_df: Optional[pd.DataFrame] = None
     suppliers_df: Optional[pd.DataFrame] = None
+
+
+def _is_raw_snapshot_run(run: dict) -> bool:
+    """
+    Best-effort detection for demo RAW snapshot runs.
+
+    We treat a run as "RAW snapshot" if:
+      - run_id contains "_raw", OR
+      - the run folder name contains "_raw"
+    """
+    try:
+        rid = str(run.get("run_id", "") or "")
+        if "_raw" in rid:
+            return True
+        p = run.get("path")
+        if p:
+            return "_raw" in Path(p).name
+    except Exception:
+        return False
+    return False
 
 
 def render_workspaces_sidebar(
@@ -59,6 +79,7 @@ def render_workspaces_sidebar(
       - Download run pack
       - View history
       - Delete run
+      - RAW demo snapshot actions (Load into Demo Mode / Convert to full run) [safe signals only]
 
     Returns:
       WorkspacesResult with:
@@ -69,6 +90,8 @@ def render_workspaces_sidebar(
     Notes:
       - This function does NOT decide "open vs resolved"; it stores/loads followups as provided.
       - Back-compat: will also return overridden outputs if a run is loaded.
+      - RAW snapshot actions are implemented as session_state *requests* that other modules
+        may choose to handle. If nothing handles them, the app still works.
     """
     ws_root = workspace_root(workspaces_dir, account_id, store_id)
     ws_root.mkdir(parents=True, exist_ok=True)
@@ -76,6 +99,14 @@ def render_workspaces_sidebar(
     loaded_key = f"{key_prefix}_loaded_run"
     if loaded_key not in st.session_state:
         st.session_state[loaded_key] = None
+
+    # Requests for other modules (safe, optional)
+    req_load_demo_key = f"{key_prefix}_req_load_snapshot_into_demo"
+    req_convert_key = f"{key_prefix}_req_convert_snapshot_to_run"
+    if req_load_demo_key not in st.session_state:
+        st.session_state[req_load_demo_key] = None
+    if req_convert_key not in st.session_state:
+        st.session_state[req_convert_key] = None
 
     with st.sidebar:
         st.divider()
@@ -110,17 +141,84 @@ def render_workspaces_sidebar(
                 st.success(f"Saved ✅ {workspace_name}/{run_dir.name}")
                 st.session_state[loaded_key] = str(run_dir)
 
-        runs = list_runs(ws_root)
+        runs = list_runs(ws_root) or []
+        raw_runs = [r for r in runs if _is_raw_snapshot_run(r)]
+        non_raw_runs = [r for r in runs if r not in raw_runs]
 
-        # --- Load + run pack ---
-        if runs:
+        # --- RAW demo snapshot awareness ---
+        if raw_runs:
+            with st.expander("🧪 RAW demo snapshots", expanded=False):
+                raw_labels = []
+                for r in raw_runs:
+                    rc = (r.get("meta", {}) or {}).get("row_counts", {}) or {}
+                    raw_labels.append(
+                        f"{r.get('workspace_name','')} / {r.get('run_id','')}  "
+                        f"(exceptions: {rc.get('exceptions','?')}, followups: {rc.get('followups','?')})"
+                    )
+
+                raw_idx = st.selectbox(
+                    "Select RAW snapshot",
+                    options=list(range(len(raw_runs))),
+                    format_func=lambda i: raw_labels[i],
+                    key=f"{key_prefix}_raw_select",
+                )
+
+                target_ws = st.text_input(
+                    "Convert target workspace",
+                    value=workspace_name,
+                    key=f"{key_prefix}_raw_convert_target_ws",
+                    help="Where the converted full run should be saved (conversion handler decides final path).",
+                )
+
+                r1, r2 = st.columns(2)
+
+                with r1:
+                    if st.button("Load snapshot → Demo Mode", key=f"{key_prefix}_btn_raw_load_demo"):
+                        try:
+                            st.session_state[req_load_demo_key] = {
+                                "snapshot_dir": str(raw_runs[raw_idx]["path"]),
+                                "source_workspace": str(raw_runs[raw_idx].get("workspace_name", "")),
+                                "source_run_id": str(raw_runs[raw_idx].get("run_id", "")),
+                            }
+                            st.success("Requested ✅ (handled by Demo UI)")
+                        except Exception as e:
+                            st.warning(f"Could not queue demo-load request: {e}")
+
+                with r2:
+                    if st.button("Convert snapshot → full run", key=f"{key_prefix}_btn_raw_convert"):
+                        try:
+                            st.session_state[req_convert_key] = {
+                                "snapshot_dir": str(raw_runs[raw_idx]["path"]),
+                                "target_workspace": str(target_ws or workspace_name),
+                                "source_workspace": str(raw_runs[raw_idx].get("workspace_name", "")),
+                                "source_run_id": str(raw_runs[raw_idx].get("run_id", "")),
+                            }
+                            st.success("Requested ✅ (handled by Workspaces/Core)")
+                        except Exception as e:
+                            st.warning(f"Could not queue conversion request: {e}")
+
+                # Show the queued request (helps debugging, never fatal)
+                try:
+                    queued_demo = st.session_state.get(req_load_demo_key)
+                    queued_conv = st.session_state.get(req_convert_key)
+                    if queued_demo or queued_conv:
+                        st.caption("Queued actions (safe signals):")
+                        if queued_demo:
+                            st.code(f"{req_load_demo_key} = {queued_demo}")
+                        if queued_conv:
+                            st.code(f"{req_convert_key} = {queued_conv}")
+                except Exception:
+                    pass
+
+        # --- Load + run pack (regular saved runs) ---
+        if non_raw_runs:
             run_labels = [
                 f"{r['workspace_name']} / {r['run_id']}  (exceptions: {r.get('meta', {}).get('row_counts', {}).get('exceptions', '?')})"
-                for r in runs
+                for r in non_raw_runs
             ]
             chosen_idx = st.selectbox(
                 "Load previous run",
-                options=list(range(len(runs))),
+                options=list(range(len(non_raw_runs))),
                 format_func=lambda i: run_labels[i],
                 key=f"{key_prefix}_load_select",
             )
@@ -128,7 +226,7 @@ def render_workspaces_sidebar(
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("📂 Load", key=f"{key_prefix}_btn_load"):
-                    st.session_state[loaded_key] = str(runs[chosen_idx]["path"])
+                    st.session_state[loaded_key] = str(non_raw_runs[chosen_idx]["path"])
                     st.success("Loaded ✅")
 
             with c2:
@@ -173,7 +271,10 @@ def render_workspaces_sidebar(
                     st.success("Deleted ✅")
                     st.rerun()
         else:
-            st.caption("No saved runs yet. Click **Save this run** to create your first run history entry.")
+            if not runs:
+                st.caption("No saved runs yet. Click **Save this run** to create your first run history entry.")
+            else:
+                st.caption("Only RAW demo snapshots found. Expand **RAW demo snapshots** above to act on them.")
 
     # --- Load override outputs (back-compat) ---
     loaded_run_dir = Path(st.session_state[loaded_key]) if st.session_state.get(loaded_key) else None
