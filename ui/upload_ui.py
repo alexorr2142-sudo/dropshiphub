@@ -39,7 +39,7 @@ def render_upload_section(*, key_prefix: str = "uploader") -> UploadInputs:
         )
     with col3:
         f_tracking = st.file_uploader(
-            "Tracking CSV (optional)",
+            "Tracking CSV\n(optional)",  # ✅ wrap to keep boxes aligned in split-screen
             type=["csv"],
             key=f"{key_prefix}_tracking",
         )
