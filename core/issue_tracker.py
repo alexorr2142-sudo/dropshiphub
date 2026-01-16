@@ -12,7 +12,6 @@ from typing import Any, Dict, Optional
 # Time helpers
 # ----------------------------
 def _utc_now_iso() -> str:
-    # Keep your original "Z" style but make it timezone-safe
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -20,7 +19,6 @@ def _parse_iso(s: str) -> Optional[datetime]:
     if not s:
         return None
     try:
-        # Handle your stored "Z" suffix
         s2 = s.replace("Z", "+00:00")
         return datetime.fromisoformat(s2)
     except Exception:
@@ -39,7 +37,7 @@ CONTACT_STATUSES = [
 ]
 
 # ----------------------------
-# Issue ownership / follow-through schema (NEW)
+# Issue ownership / follow-through schema
 # ----------------------------
 ISSUE_STATUSES = [
     "Open",
@@ -49,18 +47,10 @@ ISSUE_STATUSES = [
 
 
 def issue_tracker_path_for_ws_root(ws_root: Path) -> Path:
-    """
-    Canonical per-tenant issue tracker location.
-    Matches app.py behavior: <ws_root>/issue_tracker.json
-    """
     return Path(ws_root) / "issue_tracker.json"
 
 
 def _ensure_contact(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Migration-safe: ensures 'contact' exists and has defaults.
-    Does NOT remove anything existing.
-    """
     contact = rec.get("contact") or {}
     if not isinstance(contact, dict):
         contact = {}
@@ -75,7 +65,6 @@ def _ensure_contact(rec: Dict[str, Any]) -> Dict[str, Any]:
         hist = []
     contact["history"] = hist
 
-    # Normalize unknown status to default
     if contact.get("status") not in CONTACT_STATUSES:
         contact["status"] = "Not Contacted"
 
@@ -84,12 +73,6 @@ def _ensure_contact(rec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _derive_issue_status(rec: Dict[str, Any]) -> str:
-    """
-    Best-effort derivation for migration:
-      - resolved True -> Resolved
-      - contact.status Waiting/Escalated -> Waiting
-      - otherwise -> Open
-    """
     try:
         if bool(rec.get("resolved", False)):
             return "Resolved"
@@ -105,17 +88,11 @@ def _derive_issue_status(rec: Dict[str, Any]) -> str:
 
 
 def _ensure_issue_meta(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Migration-safe: ensures ownership + follow-through fields exist.
-    Does NOT remove anything existing.
-    """
-    # owner
     owner = rec.get("owner", "")
     if owner is None:
         owner = ""
     rec["owner"] = str(owner)
 
-    # status
     status = rec.get("status", "")
     if not isinstance(status, str) or not status.strip():
         status = _derive_issue_status(rec)
@@ -124,16 +101,13 @@ def _ensure_issue_meta(rec: Dict[str, Any]) -> Dict[str, Any]:
         status = _derive_issue_status(rec)
     rec["status"] = status
 
-    # next action
     naa = rec.get("next_action_at", "")
     if naa is None:
         naa = ""
     rec["next_action_at"] = str(naa)
 
-    # Optional small conveniences (safe defaults)
     rec.setdefault("last_action_at", "")
 
-    # Keep resolved in sync if status says Resolved
     if rec.get("status") == "Resolved":
         rec["resolved"] = True
         if not rec.get("resolved_at"):
@@ -149,55 +123,15 @@ class IssueRecord:
     created_at: str = ""
     updated_at: str = ""
     resolved_at: str = ""
-    # NOTE: dataclass not actively used for storage; kept for backward compat / clarity.
 
 
 class IssueTrackerStore:
     """
-    JSON-backed issue tracker.
+    JSON-backed issue tracker with migration-safe schema.
 
-    Compatibility (existing):
-      - load() -> dict
-      - prune_resolved_older_than_days(days) -> int
-      - clear_resolved() -> int
-      - upsert(issue_id, resolved=?, notes=?)
-      - set_resolved(issue_id, bool)
-      - set_notes(issue_id, str)
-
-    Adds (new build phase):
-      - mark_contacted(issue_id, channel="email", note="")
-      - increment_followup(issue_id, channel="email", note="")
-      - set_contact_status(issue_id, status)
-      - get_contact_summary() -> dict(status -> count)
-
-    Adds (Feature #3: ownership + next action):
-      - set_owner(issue_id, owner)
-      - set_issue_status(issue_id, status)
-      - set_next_action_at(issue_id, iso_str)
-      - get_issue(issue_id) -> dict
-      - get_issue_summary() -> dict(status -> count)
-
-    Data shape per issue_id:
-      {
-        "resolved": bool,
-        "notes": str,
-        "created_at": str,
-        "updated_at": str,
-        "resolved_at": str,
-
-        "owner": str,
-        "status": "Open" | "Waiting" | "Resolved",
-        "next_action_at": str,
-        "last_action_at": str,
-
-        "contact": {
-          "status": str,
-          "last_contacted_at": str,
-          "channel": str,
-          "follow_up_count": int,
-          "history": [ { "timestamp": str, "channel": str, "note": str, "status": str } ]
-        }
-      }
+    Adds Timeline logging (Feature #1):
+      - append-only events to <ws_root>/timeline.jsonl
+      - logging is best-effort and NEVER breaks the app
     """
 
     def __init__(self, path: Optional[str | Path] = None):
@@ -206,7 +140,7 @@ class IssueTrackerStore:
         data_dir.mkdir(parents=True, exist_ok=True)
         self.path = Path(path) if path else (data_dir / "issue_tracker.json")
 
-        # Lightweight migration: ensure contact + meta objects exist for stored records
+        # Lightweight migration: ensure contact + meta exist
         data = self.load()
         changed = False
         for k, rec in list(data.items()):
@@ -242,6 +176,45 @@ class IssueTrackerStore:
             self.save(data)
 
     # ----------------------------
+    # Timeline (best-effort)
+    # ----------------------------
+    def _timeline(self):
+        """
+        Returns TimelineStore or None. Never raises.
+        Timeline is stored beside issue_tracker.json: <ws_root>/timeline.jsonl
+        """
+        try:
+            from core.timeline_store import TimelineStore, timeline_path_for_issue_tracker_path
+
+            return TimelineStore(timeline_path_for_issue_tracker_path(self.path))
+        except Exception:
+            return None
+
+    def _log_event(
+        self,
+        *,
+        event_type: str,
+        summary: str,
+        issue_id: str,
+        data: Optional[Dict[str, Any]] = None,
+        actor: str = "user",
+    ) -> None:
+        tl = self._timeline()
+        if tl is None:
+            return
+        try:
+            tl.log(
+                scope="issue",
+                event_type=event_type,
+                summary=summary,
+                issue_id=str(issue_id or ""),
+                actor=actor,
+                data=data or {},
+            )
+        except Exception:
+            return
+
+    # ----------------------------
     # Persistence
     # ----------------------------
     def load(self) -> Dict[str, Dict[str, Any]]:
@@ -251,7 +224,6 @@ class IssueTrackerStore:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 return {}
-            # Ensure all records have defaults
             for _, rec in list(data.items()):
                 if isinstance(rec, dict):
                     _ensure_contact(rec)
@@ -273,24 +245,28 @@ class IssueTrackerStore:
             return
 
         data = self.load()
-        rec = data.get(issue_id, {}) if isinstance(data.get(issue_id, {}), dict) else {}
+        existing = data.get(issue_id)
+        rec = existing if isinstance(existing, dict) else {}
 
         now = _utc_now_iso()
-        if not rec.get("created_at"):
+        is_new = not bool(rec.get("created_at"))
+
+        if is_new:
             rec["created_at"] = now
+
+        prev_resolved = bool(rec.get("resolved", False))
+        prev_notes = str(rec.get("notes", "") or "")
 
         if resolved is not None:
             rec["resolved"] = bool(resolved)
             if bool(resolved):
                 if not rec.get("resolved_at"):
                     rec["resolved_at"] = now
-                # If resolved, also mark contact as Resolved (nice UX, safe default)
                 _ensure_contact(rec)
                 rec["contact"]["status"] = "Resolved"
                 rec["status"] = "Resolved"
             else:
                 rec["resolved_at"] = ""
-                # If unresolving, default status back to Open unless explicitly set later
                 if rec.get("status") == "Resolved":
                     rec["status"] = "Open"
 
@@ -305,6 +281,31 @@ class IssueTrackerStore:
         data[issue_id] = rec
         self.save(data)
 
+        # Timeline events (best-effort)
+        if is_new:
+            self._log_event(
+                event_type="issue.created",
+                summary="Issue created",
+                issue_id=issue_id,
+                data={},
+            )
+
+        if resolved is not None and prev_resolved != bool(resolved):
+            self._log_event(
+                event_type="issue.resolved_changed",
+                summary=f"Resolved set to {bool(resolved)}",
+                issue_id=issue_id,
+                data={"prev": prev_resolved, "new": bool(resolved)},
+            )
+
+        if notes is not None and prev_notes != str(notes):
+            self._log_event(
+                event_type="issue.notes_updated",
+                summary="Notes updated",
+                issue_id=issue_id,
+                data={"prev": prev_notes, "new": str(notes)},
+            )
+
     def set_resolved(self, issue_id: str, resolved: bool) -> None:
         self.upsert(issue_id=issue_id, resolved=resolved)
 
@@ -312,7 +313,7 @@ class IssueTrackerStore:
         self.upsert(issue_id=issue_id, notes=notes)
 
     # ----------------------------
-    # NEW: Ownership / Status / Next action (Feature #3)
+    # Ownership / Status / Next action
     # ----------------------------
     def get_issue(self, issue_id: str) -> Dict[str, Any]:
         issue_id = str(issue_id or "").strip()
@@ -332,10 +333,14 @@ class IssueTrackerStore:
             return
 
         data = self.load()
-        rec = data.get(issue_id, {}) if isinstance(data.get(issue_id, {}), dict) else {}
+        existing = data.get(issue_id)
+        rec = existing if isinstance(existing, dict) else {}
         now = _utc_now_iso()
+        is_new = not bool(rec.get("created_at"))
 
-        if not rec.get("created_at"):
+        prev_owner = str(rec.get("owner", "") or "")
+
+        if is_new:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
@@ -348,6 +353,16 @@ class IssueTrackerStore:
         data[issue_id] = rec
         self.save(data)
 
+        if is_new:
+            self._log_event("issue.created", "Issue created", issue_id=issue_id, data={})
+        if prev_owner != rec["owner"]:
+            self._log_event(
+                event_type="issue.owner_set",
+                summary=f"Owner set to {rec['owner'] or '(blank)'}",
+                issue_id=issue_id,
+                data={"prev": prev_owner, "new": rec["owner"]},
+            )
+
     def set_issue_status(self, issue_id: str, status: str) -> None:
         issue_id = str(issue_id or "").strip()
         if not issue_id:
@@ -358,10 +373,15 @@ class IssueTrackerStore:
             return
 
         data = self.load()
-        rec = data.get(issue_id, {}) if isinstance(data.get(issue_id, {}), dict) else {}
+        existing = data.get(issue_id)
+        rec = existing if isinstance(existing, dict) else {}
         now = _utc_now_iso()
+        is_new = not bool(rec.get("created_at"))
 
-        if not rec.get("created_at"):
+        prev_status = str(rec.get("status", "") or "")
+        prev_resolved = bool(rec.get("resolved", False))
+
+        if is_new:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
@@ -371,14 +391,12 @@ class IssueTrackerStore:
 
         rec["status"] = status
 
-        # Keep resolved/contact in sync
         if status == "Resolved":
             rec["resolved"] = True
             if not rec.get("resolved_at"):
                 rec["resolved_at"] = now
             rec["contact"]["status"] = "Resolved"
         else:
-            # If they reopen, do not force contact status, but keep resolved false
             rec["resolved"] = False
             rec["resolved_at"] = ""
             if rec["contact"]["status"] == "Resolved":
@@ -387,20 +405,39 @@ class IssueTrackerStore:
         data[issue_id] = rec
         self.save(data)
 
+        if is_new:
+            self._log_event("issue.created", "Issue created", issue_id=issue_id, data={})
+
+        if prev_status != status:
+            self._log_event(
+                event_type="issue.status_changed",
+                summary=f"Status changed to {status}",
+                issue_id=issue_id,
+                data={"prev": prev_status, "new": status},
+            )
+
+        if prev_resolved != bool(rec.get("resolved", False)):
+            self._log_event(
+                event_type="issue.resolved_changed",
+                summary=f"Resolved set to {bool(rec.get('resolved', False))}",
+                issue_id=issue_id,
+                data={"prev": prev_resolved, "new": bool(rec.get("resolved", False))},
+            )
+
     def set_next_action_at(self, issue_id: str, next_action_at: str) -> None:
-        """
-        next_action_at is stored as a string. Prefer UTC ISO '...Z' but we keep it permissive.
-        UI can validate/format.
-        """
         issue_id = str(issue_id or "").strip()
         if not issue_id:
             return
 
         data = self.load()
-        rec = data.get(issue_id, {}) if isinstance(data.get(issue_id, {}), dict) else {}
+        existing = data.get(issue_id)
+        rec = existing if isinstance(existing, dict) else {}
         now = _utc_now_iso()
+        is_new = not bool(rec.get("created_at"))
 
-        if not rec.get("created_at"):
+        prev_next = str(rec.get("next_action_at", "") or "")
+
+        if is_new:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
@@ -412,6 +449,17 @@ class IssueTrackerStore:
 
         data[issue_id] = rec
         self.save(data)
+
+        if is_new:
+            self._log_event("issue.created", "Issue created", issue_id=issue_id, data={})
+
+        if prev_next != rec["next_action_at"]:
+            self._log_event(
+                event_type="issue.next_action_set",
+                summary=f"Next action set to {rec['next_action_at'] or '(blank)'}",
+                issue_id=issue_id,
+                data={"prev": prev_next, "new": rec["next_action_at"]},
+            )
 
     def get_issue_summary(self) -> Dict[str, int]:
         data = self.load()
@@ -428,7 +476,7 @@ class IssueTrackerStore:
         return counts
 
     # ----------------------------
-    # New: Contact / Follow-up tracking
+    # Contact / Follow-up tracking
     # ----------------------------
     def mark_contacted(
         self,
@@ -445,10 +493,13 @@ class IssueTrackerStore:
             new_status = "Contacted"
 
         data = self.load()
-        rec = data.get(issue_id, {}) if isinstance(data.get(issue_id, {}), dict) else {}
+        existing = data.get(issue_id)
+        rec = existing if isinstance(existing, dict) else {}
 
         now = _utc_now_iso()
-        if not rec.get("created_at"):
+        is_new = not bool(rec.get("created_at"))
+
+        if is_new:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
@@ -456,12 +507,13 @@ class IssueTrackerStore:
         _ensure_contact(rec)
         _ensure_issue_meta(rec)
 
+        prev_contact_status = str(rec["contact"].get("status", "") or "Not Contacted")
+        prev_count = int(rec["contact"].get("follow_up_count") or 0)
+
         rec["contact"]["status"] = new_status
         rec["contact"]["last_contacted_at"] = now
         rec["contact"]["channel"] = str(channel or "").strip()
-
-        # Treat first outreach as follow-up count increment
-        rec["contact"]["follow_up_count"] = int(rec["contact"].get("follow_up_count") or 0) + 1
+        rec["contact"]["follow_up_count"] = prev_count + 1
 
         rec["contact"]["history"].append(
             {
@@ -472,13 +524,27 @@ class IssueTrackerStore:
             }
         )
 
-        # Best-effort issue-level sync:
-        # If we contacted and it's not resolved, it is often "Waiting"
         if rec.get("status") != "Resolved" and new_status in ("Waiting", "Escalated"):
             rec["status"] = "Waiting"
 
         data[issue_id] = rec
         self.save(data)
+
+        if is_new:
+            self._log_event("issue.created", "Issue created", issue_id=issue_id, data={})
+
+        self._log_event(
+            event_type="contact.mark_contacted",
+            summary=f"Contact logged ({rec['contact']['channel'] or 'channel'})",
+            issue_id=issue_id,
+            data={
+                "channel": rec["contact"]["channel"],
+                "note": str(note or ""),
+                "prev_status": prev_contact_status,
+                "new_status": new_status,
+                "follow_up_count": rec["contact"]["follow_up_count"],
+            },
+        )
 
     def increment_followup(self, issue_id: str, channel: str = "email", note: str = "") -> None:
         issue_id = str(issue_id or "").strip()
@@ -486,10 +552,13 @@ class IssueTrackerStore:
             return
 
         data = self.load()
-        rec = data.get(issue_id, {}) if isinstance(data.get(issue_id, {}), dict) else {}
+        existing = data.get(issue_id)
+        rec = existing if isinstance(existing, dict) else {}
 
         now = _utc_now_iso()
-        if not rec.get("created_at"):
+        is_new = not bool(rec.get("created_at"))
+
+        if is_new:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
@@ -497,11 +566,13 @@ class IssueTrackerStore:
         _ensure_contact(rec)
         _ensure_issue_meta(rec)
 
-        rec["contact"]["follow_up_count"] = int(rec["contact"].get("follow_up_count") or 0) + 1
+        prev_count = int(rec["contact"].get("follow_up_count") or 0)
+        prev_contact_status = str(rec["contact"].get("status", "") or "Not Contacted")
+
+        rec["contact"]["follow_up_count"] = prev_count + 1
         rec["contact"]["last_contacted_at"] = now
         rec["contact"]["channel"] = str(channel or "").strip()
 
-        # If following up and not resolved, default to Waiting (unless Escalated already)
         if rec["contact"]["status"] not in ("Resolved", "Escalated"):
             rec["contact"]["status"] = "Waiting"
 
@@ -514,12 +585,28 @@ class IssueTrackerStore:
             }
         )
 
-        # Issue-level sync: follow-up implies "Waiting" unless resolved
         if rec.get("status") != "Resolved":
             rec["status"] = "Waiting"
 
         data[issue_id] = rec
         self.save(data)
+
+        if is_new:
+            self._log_event("issue.created", "Issue created", issue_id=issue_id, data={})
+
+        self._log_event(
+            event_type="contact.followup",
+            summary="Follow-up logged",
+            issue_id=issue_id,
+            data={
+                "channel": rec["contact"]["channel"],
+                "note": str(note or ""),
+                "prev_status": prev_contact_status,
+                "new_status": rec["contact"]["status"],
+                "prev_follow_up_count": prev_count,
+                "new_follow_up_count": rec["contact"]["follow_up_count"],
+            },
+        )
 
     def set_contact_status(self, issue_id: str, status: str) -> None:
         issue_id = str(issue_id or "").strip()
@@ -529,10 +616,13 @@ class IssueTrackerStore:
             return
 
         data = self.load()
-        rec = data.get(issue_id, {}) if isinstance(data.get(issue_id, {}), dict) else {}
-        now = _utc_now_iso()
+        existing = data.get(issue_id)
+        rec = existing if isinstance(existing, dict) else {}
 
-        if not rec.get("created_at"):
+        now = _utc_now_iso()
+        is_new = not bool(rec.get("created_at"))
+
+        if is_new:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
@@ -540,9 +630,9 @@ class IssueTrackerStore:
         _ensure_contact(rec)
         _ensure_issue_meta(rec)
 
+        prev_contact_status = str(rec["contact"].get("status", "") or "Not Contacted")
         rec["contact"]["status"] = status
 
-        # Keep resolved/status in sync if they set Resolved here
         if status == "Resolved":
             rec["resolved"] = True
             rec["status"] = "Resolved"
@@ -553,6 +643,17 @@ class IssueTrackerStore:
 
         data[issue_id] = rec
         self.save(data)
+
+        if is_new:
+            self._log_event("issue.created", "Issue created", issue_id=issue_id, data={})
+
+        if prev_contact_status != status:
+            self._log_event(
+                event_type="contact.status_changed",
+                summary=f"Contact status changed to {status}",
+                issue_id=issue_id,
+                data={"prev": prev_contact_status, "new": status},
+            )
 
     def get_contact_summary(self) -> Dict[str, int]:
         data = self.load()
@@ -569,7 +670,7 @@ class IssueTrackerStore:
         return counts
 
     # ----------------------------
-    # Maintenance (existing)
+    # Maintenance
     # ----------------------------
     def prune_resolved_older_than_days(self, days: int) -> int:
         days = int(days)
