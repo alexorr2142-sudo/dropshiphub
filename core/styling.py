@@ -1,6 +1,9 @@
 # core/styling.py
+from __future__ import annotations
+
 import pandas as pd
 import streamlit.components.v1 as components
+
 
 def copy_button(text: str, label: str, key: str):
     safe_text = (
@@ -36,7 +39,15 @@ def copy_button(text: str, label: str, key: str):
     """
     components.html(html, height=55)
 
+
 def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds an ordered categorical Urgency column:
+      Critical > High > Medium > Low
+    """
+    if exceptions_df is None or exceptions_df.empty:
+        return exceptions_df if isinstance(exceptions_df, pd.DataFrame) else pd.DataFrame()
+
     df = exceptions_df.copy()
 
     def classify_row(row) -> str:
@@ -79,9 +90,13 @@ def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
     )
     return df
 
+
 def style_exceptions_table(df: pd.DataFrame):
-    if "Urgency" not in df.columns:
-        return df.style
+    """
+    Row-highlights exceptions by Urgency.
+    """
+    if df is None or df.empty or "Urgency" not in df.columns:
+        return df.style if isinstance(df, pd.DataFrame) else pd.DataFrame().style
 
     colors = {
         "Critical": "background-color: #ffd6d6;",
@@ -95,3 +110,19 @@ def style_exceptions_table(df: pd.DataFrame):
         return [colors.get(u, "")] * len(row)
 
     return df.style.apply(row_style, axis=1)
+
+
+def style_supplier_table(df: pd.DataFrame):
+    """
+    Highlights supplier rows missing supplier_email.
+    """
+    if df is None or df.empty or "supplier_email" not in df.columns:
+        return df.style if isinstance(df, pd.DataFrame) else pd.DataFrame().style
+
+    def _row_style(row):
+        email = str(row.get("supplier_email", "")).strip()
+        if email == "" or email.lower() in ["nan", "none"]:
+            return ["background-color: #fff1cc;"] * len(row)
+        return [""] * len(row)
+
+    return df.style.apply(_row_style, axis=1)
