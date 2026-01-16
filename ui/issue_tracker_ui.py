@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import pandas as pd
 import streamlit as st
@@ -23,6 +23,36 @@ def _get_store(issue_tracker_path: Optional[Path] = None) -> IssueTrackerStore:
     except TypeError:
         # Backward compatibility if IssueTrackerStore() signature differs
         return IssueTrackerStore()
+
+
+def _row_context(r: pd.Series) -> Dict[str, Any]:
+    """
+    Best-effort context extraction for timeline + filtering.
+    Only includes keys that exist / are non-empty.
+    """
+    ctx: Dict[str, Any] = {}
+
+    def _pick(col: str) -> str:
+        try:
+            return str(r.get(col, "") or "").strip()
+        except Exception:
+            return ""
+
+    supplier_name = _pick("supplier_name")
+    supplier_email = _pick("supplier_email")
+    order_id = _pick("order_id")
+    order_ids = _pick("order_ids")
+
+    if supplier_name:
+        ctx["supplier_name"] = supplier_name
+    if supplier_email:
+        ctx["supplier_email"] = supplier_email
+    if order_id:
+        ctx["order_id"] = order_id
+    if order_ids:
+        ctx["order_ids"] = order_ids
+
+    return ctx
 
 
 def derive_followups_open(
@@ -222,10 +252,11 @@ def render_issue_ownership_panel(
     except Exception:
         work = followups_df.copy()
 
-    # Keep the editor narrow and stable
     cols_pref = [
         "issue_id",
         "supplier_name",
+        "supplier_email",
+        "order_id",
         "order_ids",
         "worst_escalation",
         "urgency",
@@ -280,33 +311,43 @@ def render_issue_ownership_panel(
                         if not iid:
                             continue
 
-                        # Safe calls (new methods may not exist in older core)
+                        ctx = _row_context(r)
+
                         owner = str(r.get("owner", "") or "").strip()
                         status = str(r.get("issue_status", "") or "").strip()
                         next_action = str(r.get("next_action_at", "") or "").strip()
 
                         if owner:
                             try:
-                                store.set_owner(iid, owner)
+                                store.set_owner(iid, owner, context=ctx)
                             except Exception:
-                                pass
+                                try:
+                                    store.set_owner(iid, owner)
+                                except Exception:
+                                    pass
 
                         if status in ISSUE_STATUSES:
                             try:
-                                store.set_issue_status(iid, status)
+                                store.set_issue_status(iid, status, context=ctx)
                             except Exception:
-                                # fallback: map resolved to old method
-                                if status == "Resolved":
-                                    try:
-                                        store.set_resolved(iid, True)
-                                    except Exception:
-                                        pass
+                                try:
+                                    store.set_issue_status(iid, status)
+                                except Exception:
+                                    # fallback: map resolved to old method
+                                    if status == "Resolved":
+                                        try:
+                                            store.set_resolved(iid, True)
+                                        except Exception:
+                                            pass
 
                         if next_action:
                             try:
-                                store.set_next_action_at(iid, next_action)
+                                store.set_next_action_at(iid, next_action, context=ctx)
                             except Exception:
-                                pass
+                                try:
+                                    store.set_next_action_at(iid, next_action)
+                                except Exception:
+                                    pass
 
                     st.success("Saved ✅")
                     st.rerun()
@@ -319,10 +360,7 @@ def render_issue_ownership_panel(
                 st.info("Tip: use the table editor to set status=Waiting, then click Save assignments.")
 
         with c3:
-            st.caption(
-                "Workflow: assign an owner, set a next action, then log outreach. "
-                "Nothing should remain unowned."
-            )
+            st.caption("Workflow: assign an owner, set a next action, then log outreach. Nothing should remain unowned.")
 
         st.divider()
 
@@ -343,16 +381,29 @@ def render_issue_ownership_panel(
         with col_b:
             note = st.text_input("Note (optional)", value="", key=f"{key_prefix}_log_note")
 
+        # Find context for selected iid (best effort)
+        ctx_for_iid: Dict[str, Any] = {}
+        try:
+            sel = edited[edited["issue_id"].astype(str) == str(iid)].iloc[0]
+            ctx_for_iid = _row_context(sel)
+        except Exception:
+            ctx_for_iid = {}
+
         f1, f2, f3 = st.columns(3)
         with f1:
             if st.button("📨 First outreach", use_container_width=True, key=f"{key_prefix}_btn_contacted"):
                 try:
-                    store.mark_contacted(issue_id=iid, channel=channel, note=note, new_status="Contacted")
-                    # Best effort: if issue status exists, set to Waiting
                     try:
-                        store.set_issue_status(iid, "Waiting")
+                        store.mark_contacted(issue_id=iid, channel=channel, note=note, new_status="Contacted", context=ctx_for_iid)
                     except Exception:
-                        pass
+                        store.mark_contacted(issue_id=iid, channel=channel, note=note, new_status="Contacted")
+                    try:
+                        store.set_issue_status(iid, "Waiting", context=ctx_for_iid)
+                    except Exception:
+                        try:
+                            store.set_issue_status(iid, "Waiting")
+                        except Exception:
+                            pass
                     st.success("Logged outreach ✅")
                     st.rerun()
                 except Exception as e:
@@ -362,11 +413,17 @@ def render_issue_ownership_panel(
         with f2:
             if st.button("🔁 Follow-up", use_container_width=True, key=f"{key_prefix}_btn_followup"):
                 try:
-                    store.increment_followup(issue_id=iid, channel=channel, note=note)
                     try:
-                        store.set_issue_status(iid, "Waiting")
+                        store.increment_followup(issue_id=iid, channel=channel, note=note, context=ctx_for_iid)
                     except Exception:
-                        pass
+                        store.increment_followup(issue_id=iid, channel=channel, note=note)
+                    try:
+                        store.set_issue_status(iid, "Waiting", context=ctx_for_iid)
+                    except Exception:
+                        try:
+                            store.set_issue_status(iid, "Waiting")
+                        except Exception:
+                            pass
                     st.success("Logged follow-up ✅")
                     st.rerun()
                 except Exception as e:
@@ -376,11 +433,13 @@ def render_issue_ownership_panel(
         with f3:
             if st.button("✅ Resolve", use_container_width=True, key=f"{key_prefix}_btn_resolve"):
                 try:
-                    # Prefer new method if present
                     try:
-                        store.set_issue_status(iid, "Resolved")
+                        store.set_issue_status(iid, "Resolved", context=ctx_for_iid)
                     except Exception:
-                        store.set_resolved(iid, True)
+                        try:
+                            store.set_issue_status(iid, "Resolved")
+                        except Exception:
+                            store.set_resolved(iid, True)
                     st.success("Resolved ✅")
                     st.rerun()
                 except Exception as e:
@@ -434,6 +493,7 @@ def render_issue_tracker_panel(
             "issue_id",
             "supplier_name",
             "supplier_email",
+            "order_id",
             "order_ids",
             "item_count",
             "worst_escalation",
@@ -444,7 +504,6 @@ def render_issue_tracker_panel(
         cols_show = [c for c in cols_pref if c in df.columns]
         work = df[cols_show].copy()
 
-        # Keep editor stable
         sort_cols = []
         if "resolved" in work.columns:
             sort_cols.append("resolved")
@@ -473,11 +532,22 @@ def render_issue_tracker_panel(
                         iid = str(r.get("issue_id", "")).strip()
                         if not iid:
                             continue
-                        store.upsert(
-                            issue_id=iid,
-                            resolved=bool(r.get("resolved", False)),
-                            notes=str(r.get("notes", "") or ""),
-                        )
+                        ctx = _row_context(r)
+
+                        try:
+                            store.upsert(
+                                issue_id=iid,
+                                resolved=bool(r.get("resolved", False)),
+                                notes=str(r.get("notes", "") or ""),
+                                context=ctx,
+                            )
+                        except Exception:
+                            store.upsert(
+                                issue_id=iid,
+                                resolved=bool(r.get("resolved", False)),
+                                notes=str(r.get("notes", "") or ""),
+                            )
+
                     st.success("Saved ✅")
                     st.rerun()
                 except Exception as e:
@@ -509,7 +579,7 @@ def apply_issue_tracker(
         "followups_open": pd.DataFrame,
         "followups_open_with_contact": pd.DataFrame,
 
-        # NEW (additive keys):
+        # additive keys:
         "followups_open_with_issue": pd.DataFrame,
         "followups_open_enriched": pd.DataFrame,  # issue + contact
       }
@@ -545,7 +615,6 @@ def apply_issue_tracker(
         "followups_full": followups_full,
         "followups_open": followups_open,
         "followups_open_with_contact": followups_open_with_contact,
-        # additive:
         "followups_open_with_issue": followups_open_with_issue,
         "followups_open_enriched": followups_open_enriched,
     }
