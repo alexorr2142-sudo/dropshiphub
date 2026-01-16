@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+
 def safe_slug(s: str) -> str:
     s = (s or "").strip()
     keep = []
@@ -17,8 +18,10 @@ def safe_slug(s: str) -> str:
     out = "".join(keep).strip().replace(" ", "_")
     return out[:60] if out else "workspace"
 
+
 def workspace_root(workspaces_dir: Path, account_id: str, store_id: str) -> Path:
     return workspaces_dir / safe_slug(account_id) / safe_slug(store_id)
+
 
 def list_runs(ws_root: Path) -> list[dict]:
     if not ws_root.exists():
@@ -54,6 +57,7 @@ def list_runs(ws_root: Path) -> list[dict]:
     runs.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return runs
 
+
 def save_run(
     ws_root: Path,
     workspace_name: str,
@@ -81,7 +85,7 @@ def save_run(
     order_rollup.to_csv(run_dir / "order_rollup.csv", index=False)
     line_status_df.to_csv(run_dir / "line_status.csv", index=False)
 
-    # Inputs
+    # Inputs (normalized)
     orders.to_csv(run_dir / "orders_normalized.csv", index=False)
     shipments.to_csv(run_dir / "shipments_normalized.csv", index=False)
     tracking.to_csv(run_dir / "tracking_normalized.csv", index=False)
@@ -110,6 +114,68 @@ def save_run(
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return run_dir
 
+
+# ------------------------------
+# NEW: Save RAW input snapshots
+# ------------------------------
+def save_raw_inputs_snapshot(
+    ws_root: Path,
+    workspace_name: str,
+    *,
+    account_id: str,
+    store_id: str,
+    platform_hint: str = "",
+    raw_orders: pd.DataFrame,
+    raw_shipments: pd.DataFrame,
+    raw_tracking: pd.DataFrame | None = None,
+    note: str = "",
+    source: str = "demo_fork",
+) -> Path:
+    """
+    Saves the *raw* (pre-normalize) inputs as a "snapshot run" under a workspace.
+    This does NOT replace your normal save_run(); it complements it.
+
+    Output files written:
+      - raw_orders.csv
+      - raw_shipments.csv
+      - raw_tracking.csv (optional, written even if empty for consistency)
+      - meta.json
+
+    You can use this to preserve demo edits even before running a pipeline,
+    and without touching app.py.
+    """
+    workspace_name = safe_slug(workspace_name)
+    run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + "_raw"
+    run_dir = ws_root / workspace_name / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    (raw_orders if isinstance(raw_orders, pd.DataFrame) else pd.DataFrame()).to_csv(
+        run_dir / "raw_orders.csv", index=False
+    )
+    (raw_shipments if isinstance(raw_shipments, pd.DataFrame) else pd.DataFrame()).to_csv(
+        run_dir / "raw_shipments.csv", index=False
+    )
+    rt = raw_tracking if isinstance(raw_tracking, pd.DataFrame) else pd.DataFrame()
+    rt.to_csv(run_dir / "raw_tracking.csv", index=False)
+
+    meta = {
+        "created_at": run_id,
+        "workspace_name": workspace_name,
+        "account_id": account_id,
+        "store_id": store_id,
+        "platform_hint": platform_hint,
+        "source": source,
+        "note": note,
+        "row_counts": {
+            "raw_orders": int(len(raw_orders)) if isinstance(raw_orders, pd.DataFrame) else 0,
+            "raw_shipments": int(len(raw_shipments)) if isinstance(raw_shipments, pd.DataFrame) else 0,
+            "raw_tracking": int(len(rt)),
+        },
+    }
+    (run_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return run_dir
+
+
 def load_run(run_dir: Path) -> dict:
     out = {"meta": {}}
     meta_path = run_dir / "meta.json"
@@ -123,6 +189,7 @@ def load_run(run_dir: Path) -> dict:
         p = run_dir / name
         return pd.read_csv(p) if p.exists() else pd.DataFrame()
 
+    # Standard outputs / inputs
     out["exceptions"] = _read_csv("exceptions.csv")
     out["followups"] = _read_csv("followups.csv")
     out["order_rollup"] = _read_csv("order_rollup.csv")
@@ -131,7 +198,13 @@ def load_run(run_dir: Path) -> dict:
     out["shipments"] = _read_csv("shipments_normalized.csv")
     out["tracking"] = _read_csv("tracking_normalized.csv")
     out["suppliers_df"] = _read_csv("suppliers.csv")
+
+    # Raw snapshot files (if present)
+    out["raw_orders"] = _read_csv("raw_orders.csv")
+    out["raw_shipments"] = _read_csv("raw_shipments.csv")
+    out["raw_tracking"] = _read_csv("raw_tracking.csv")
     return out
+
 
 def make_run_zip_bytes(run_dir: Path) -> bytes:
     buf = io.BytesIO()
@@ -142,9 +215,11 @@ def make_run_zip_bytes(run_dir: Path) -> bytes:
     buf.seek(0)
     return buf.read()
 
+
 def delete_run_dir(run_dir: Path) -> None:
     if run_dir.exists() and run_dir.is_dir():
         shutil.rmtree(run_dir, ignore_errors=True)
+
 
 def build_run_history_df(runs: list[dict]) -> pd.DataFrame:
     rows = []
