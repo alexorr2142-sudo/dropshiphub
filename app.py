@@ -186,6 +186,10 @@ def _mailto_fallback(to: str, subject: str, body: str) -> str:
     return f"mailto:{quote(to or '')}?subject={quote(subject or '')}&body={quote(body or '')}"
 
 
+def _is_empty_df(x) -> bool:
+    return (x is None) or (not isinstance(x, pd.DataFrame)) or x.empty
+
+
 # ============================================================
 # Page setup (NO ACCESS GATES right now)
 # ============================================================
@@ -233,7 +237,6 @@ else:
         )
 
         demo_mode = st.toggle("Use demo data (sticky)", key="demo_mode_fallback")
-
         suppliers_df = pd.DataFrame()
 
     ctx = {
@@ -372,6 +375,51 @@ else:
         raw_orders = pd.read_csv(uploads.f_orders)
         raw_shipments = pd.read_csv(uploads.f_shipments)
         raw_tracking = pd.read_csv(uploads.f_tracking) if uploads.f_tracking else pd.DataFrame()
+
+# ============================================================
+# BUGFIX: stop early if Orders/Shipments are empty (avoid reconcile crash)
+# ============================================================
+if _is_empty_df(raw_orders) or _is_empty_df(raw_shipments):
+    st.divider()
+    st.subheader("Data checks")
+    st.warning("We found some schema issues. You can still proceed, but fixing these improves accuracy:")
+
+    if _is_empty_df(raw_orders):
+        st.write("- [orders] Input orders dataframe is empty.")
+    if _is_empty_df(raw_shipments):
+        st.write("- [shipments] Input shipments dataframe is empty.")
+
+    st.error("Cannot run reconciliation without Orders + Shipments data (missing required columns like order_id and sku).")
+
+    if demo_mode_active:
+        st.info(
+            "Demo Mode is ON, but demo data is empty. "
+            "This means the demo loader didn't populate demo_raw_orders/demo_raw_shipments."
+        )
+        st.caption("Next fix is in ui/demo.py (demo loader).")
+    else:
+        st.info("Please upload both **Orders CSV** and **Shipments CSV** in the Upload section.")
+
+    with st.expander("Debug (raw input shapes / columns)", expanded=False):
+        if isinstance(raw_orders, pd.DataFrame):
+            st.write("raw_orders shape:", raw_orders.shape)
+            st.write("raw_orders columns:", list(raw_orders.columns))
+        else:
+            st.write("raw_orders:", type(raw_orders))
+
+        if isinstance(raw_shipments, pd.DataFrame):
+            st.write("raw_shipments shape:", raw_shipments.shape)
+            st.write("raw_shipments columns:", list(raw_shipments.columns))
+        else:
+            st.write("raw_shipments:", type(raw_shipments))
+
+        if isinstance(raw_tracking, pd.DataFrame):
+            st.write("raw_tracking shape:", raw_tracking.shape)
+            st.write("raw_tracking columns:", list(raw_tracking.columns))
+        else:
+            st.write("raw_tracking:", type(raw_tracking))
+
+    st.stop()
 
 # ============================================================
 # Normalize
