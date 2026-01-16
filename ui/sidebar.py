@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from core.suppliers import load_suppliers, save_suppliers
+from ui.demo_health import render_demo_health_badge
 
 
 def render_sidebar_context(
@@ -99,7 +100,6 @@ def render_sidebar_context(
         st.divider()
         st.header("Demo Mode (Sticky)")
 
-        # ✅ IMPORTANT: do NOT use global key="demo_mode" here
         demo_mode = st.toggle(
             "Use demo data (sticky)",
             key=f"{key_prefix}_demo_mode",
@@ -107,13 +107,14 @@ def render_sidebar_context(
         )
 
         # Keep a canonical boolean in session_state for other modules to read safely
-        # Streamlit may throw if 'demo_mode' is (or was) bound to a widget key elsewhere.
         demo_mode_bool = bool(demo_mode)
         try:
             st.session_state["demo_mode"] = demo_mode_bool
         except Exception:
-            # Fallback key that will not collide with any widget
             st.session_state["app_demo_mode"] = demo_mode_bool
+
+        # NEW: Demo health badge (no app.py changes)
+        render_demo_health_badge(data_dir)
 
         # ----------------
         # Supplier Directory (CRM)
@@ -121,7 +122,6 @@ def render_sidebar_context(
         st.divider()
         st.header("Supplier Directory (CRM)")
 
-        # Load saved suppliers for this tenant (once per tenant change)
         cache_key = f"{key_prefix}_suppliers_df_cache"
         cache_tenant_key = f"{key_prefix}_suppliers_df_cache_tenant"
 
@@ -175,10 +175,7 @@ def render_sidebar_context(
 
     suppliers_df = st.session_state.get(f"{key_prefix}_suppliers_df_cache", pd.DataFrame())
 
-    # Read canonical demo mode without crashing even if Streamlit blocked 'demo_mode'
-    effective_demo_mode = bool(
-        st.session_state.get("demo_mode", st.session_state.get("app_demo_mode", False))
-    )
+    effective_demo_mode = bool(st.session_state.get("demo_mode", st.session_state.get("app_demo_mode", False)))
 
     return {
         "account_id": account_id,
