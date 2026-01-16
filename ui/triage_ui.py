@@ -16,20 +16,13 @@ def render_ops_triage(
     top_n: int = 10,
 ) -> None:
     """
-    Renders the Ops Triage panel (Start here) exactly like app.py:
+    Renders the Ops Triage panel (Start here):
 
       - Urgency counts
       - 4 triage modes stored in session_state
       - filter logic for CriticalHigh, MissingTracking, LateUnshipped
       - table preview (top N)
       - download ops pack ZIP
-
-    Inputs:
-      exceptions: DataFrame with (best effort) columns:
-        Urgency, order_id, sku, issue_type, customer_country, supplier_name,
-        quantity_ordered, quantity_shipped, line_status, explanation, next_action, customer_risk
-      ops_pack_bytes: bytes for Daily Ops Pack ZIP
-      pack_name: filename for the ZIP download
     """
     st.subheader("Ops Triage (Start here)")
 
@@ -138,13 +131,16 @@ def render_ops_triage(
     if sort_cols:
         triage = triage.sort_values(sort_cols, ascending=True)
 
+    # If no preferred cols exist, show the raw df safely
+    preview = triage.head(int(top_n)) if not show_cols else triage[show_cols].head(int(top_n))
+
     st.dataframe(
-        style_exceptions_table(triage[show_cols].head(int(top_n))),
+        style_exceptions_table(preview),
         use_container_width=True,
         height=320,
     )
 
-    # --- download ops pack zip (matches app.py) ---
+    # --- download ops pack zip ---
     st.download_button(
         "⬇️ Download Daily Ops Pack ZIP",
         data=ops_pack_bytes,
