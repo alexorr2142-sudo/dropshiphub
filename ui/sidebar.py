@@ -2,17 +2,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
 from core.suppliers import load_suppliers, save_suppliers
-
-# Demo helpers (robust import; won't crash sidebar if demo module changes)
-try:
-    from ui.demo import reset_demo, clear_demo  # type: ignore
-except Exception:
-    reset_demo = None
-    clear_demo = None
 
 
 def render_sidebar_context(
@@ -21,22 +15,14 @@ def render_sidebar_context(
     suppliers_dir: Path,
     *,
     key_prefix: str = "sb",
-    # Optional extras (so app.py can stay thin later)
-    issue_tracker_store_cls=None,   # pass IssueTrackerStore or None
-    issue_tracker_path: Path | None = None,
-    ops_pack_bytes: bytes | None = None,
-    ops_pack_name: str | None = None,
 ) -> dict:
     """
-    Renders the sidebar and returns a context dict:
+    Renders sidebar controls and returns:
       account_id, store_id, platform_hint,
       default_currency, default_promised_ship_days,
       suppliers_df, demo_mode
-
-    Optional:
-      - Issue Tracker maintenance tools (prune/clear resolved)
-      - Daily Ops Pack download button
     """
+
     with st.sidebar:
         # ----------------
         # Plan
@@ -72,8 +58,16 @@ def render_sidebar_context(
         # ----------------
         st.divider()
         st.header("Tenant")
-        account_id = st.text_input("account_id", value="demo_account", key=f"{key_prefix}_account_id")
-        store_id = st.text_input("store_id", value="demo_store", key=f"{key_prefix}_store_id")
+        account_id = st.text_input(
+            "account_id",
+            value="demo_account",
+            key=f"{key_prefix}_account_id",
+        )
+        store_id = st.text_input(
+            "store_id",
+            value="demo_store",
+            key=f"{key_prefix}_store_id",
+        )
         platform_hint = st.selectbox(
             "platform hint",
             ["shopify", "amazon", "etsy", "other"],
@@ -86,7 +80,11 @@ def render_sidebar_context(
         # ----------------
         st.divider()
         st.header("Defaults")
-        default_currency = st.text_input("Default currency", value="USD", key=f"{key_prefix}_currency")
+        default_currency = st.text_input(
+            "Default currency",
+            value="USD",
+            key=f"{key_prefix}_currency",
+        )
         default_promised_ship_days = st.number_input(
             "Default promised ship days (SLA)",
             min_value=1,
@@ -100,72 +98,16 @@ def render_sidebar_context(
         # ----------------
         st.divider()
         st.header("Demo Mode (Sticky)")
+
+        # ✅ IMPORTANT: do NOT use global key="demo_mode" here
         demo_mode = st.toggle(
             "Use demo data (sticky)",
-            key="demo_mode",  # global key on purpose (shared across modules)
-            help="Keeps demo data and your edits across interactions until you reset or turn off demo mode.",
+            key=f"{key_prefix}_demo_mode",
+            help="Keeps demo data and your edits across interactions until you turn it off.",
         )
 
-        if demo_mode:
-            c1, c2 = st.columns(2)
-
-            with c1:
-                if st.button("Reset demo", use_container_width=True, key=f"{key_prefix}_demo_reset"):
-                    if callable(reset_demo):
-                        reset_demo(data_dir)
-                        st.success("Demo reset ✅")
-                        st.rerun()
-                    else:
-                        st.warning("reset_demo() not available. Check ui/demo.py exports.")
-
-            with c2:
-                if st.button("Clear demo", use_container_width=True, key=f"{key_prefix}_demo_clear"):
-                    st.session_state["demo_mode"] = False
-                    if callable(clear_demo):
-                        clear_demo()
-                    else:
-                        # safe fallback: just remove demo frames if present
-                        for k in ["demo_raw_orders", "demo_raw_shipments", "demo_raw_tracking"]:
-                            st.session_state.pop(k, None)
-                    st.rerun()
-
-        # ----------------
-        # Issue Tracker Maintenance (optional)
-        # ----------------
-        if issue_tracker_store_cls is not None and issue_tracker_path is not None:
-            st.divider()
-            with st.expander("Issue Tracker Maintenance", expanded=False):
-                prune_days = st.number_input(
-                    "Prune resolved older than (days)",
-                    min_value=1,
-                    max_value=365,
-                    value=30,
-                    step=1,
-                    key=f"{key_prefix}_issue_prune_days",
-                )
-
-                cmt1, cmt2 = st.columns(2)
-                with cmt1:
-                    if st.button("🧹 Prune old resolved", use_container_width=True, key=f"{key_prefix}_issue_prune_btn"):
-                        try:
-                            store = issue_tracker_store_cls(issue_tracker_path)
-                            removed = store.prune_resolved_older_than_days(int(prune_days))
-                            st.success(f"Pruned {removed} resolved item(s).")
-                            st.rerun()
-                        except Exception as e:
-                            st.error("Failed to prune resolved issues.")
-                            st.code(str(e))
-
-                with cmt2:
-                    if st.button("🗑️ Clear ALL resolved", use_container_width=True, key=f"{key_prefix}_issue_clear_btn"):
-                        try:
-                            store = issue_tracker_store_cls(issue_tracker_path)
-                            removed = store.clear_resolved()
-                            st.success(f"Cleared {removed} resolved item(s).")
-                            st.rerun()
-                        except Exception as e:
-                            st.error("Failed to clear resolved issues.")
-                            st.code(str(e))
+        # Keep a single canonical boolean in session_state for other modules to read safely
+        st.session_state["demo_mode"] = bool(demo_mode)
 
         # ----------------
         # Supplier Directory (CRM)
@@ -173,9 +115,14 @@ def render_sidebar_context(
         st.divider()
         st.header("Supplier Directory (CRM)")
 
-        # Persist supplier directory across reruns
-        if "suppliers_df" not in st.session_state:
-            st.session_state["suppliers_df"] = load_suppliers(suppliers_dir, account_id, store_id)
+        # Load saved suppliers for this tenant (once per tenant change)
+        cache_key = f"{key_prefix}_suppliers_df_cache"
+        cache_tenant_key = f"{key_prefix}_suppliers_df_cache_tenant"
+
+        cur_tenant = f"{account_id}::{store_id}"
+        if st.session_state.get(cache_tenant_key) != cur_tenant:
+            st.session_state[cache_tenant_key] = cur_tenant
+            st.session_state[cache_key] = load_suppliers(suppliers_dir, account_id, store_id)
 
         f_suppliers = st.file_uploader(
             "Upload suppliers.csv",
@@ -185,7 +132,7 @@ def render_sidebar_context(
         if f_suppliers is not None:
             try:
                 uploaded_suppliers = pd.read_csv(f_suppliers)
-                st.session_state["suppliers_df"] = uploaded_suppliers
+                st.session_state[cache_key] = uploaded_suppliers
                 p = save_suppliers(suppliers_dir, account_id, store_id, uploaded_suppliers)
                 st.success(f"Saved ✅ {p.as_posix()}")
             except Exception as e:
@@ -193,12 +140,13 @@ def render_sidebar_context(
                 st.code(str(e))
 
         with st.expander("View Supplier Directory", expanded=False):
-            suppliers_df_preview = st.session_state.get("suppliers_df", pd.DataFrame())
+            suppliers_df_preview = st.session_state.get(cache_key, pd.DataFrame())
             if suppliers_df_preview is None or suppliers_df_preview.empty:
                 st.caption("No supplier directory loaded yet. Upload suppliers.csv to auto-fill follow-up emails.")
             else:
                 show_cols = [
-                    c for c in ["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"]
+                    c
+                    for c in ["supplier_name", "supplier_email", "supplier_channel", "language", "timezone"]
                     if c in suppliers_df_preview.columns
                 ]
                 st.dataframe(
@@ -219,22 +167,7 @@ def render_sidebar_context(
 
         st.caption("Tip: Upload suppliers.csv once per account/store to auto-fill follow-up emails.")
 
-        # ----------------
-        # Daily Ops Pack (optional)
-        # ----------------
-        if ops_pack_bytes is not None and ops_pack_name:
-            st.divider()
-            st.header("Daily Ops Pack")
-            st.download_button(
-                "⬇️ Download Daily Ops Pack ZIP",
-                data=ops_pack_bytes,
-                file_name=str(ops_pack_name),
-                mime="application/zip",
-                use_container_width=True,
-                key=f"{key_prefix}_ops_pack_dl",
-            )
-
-    suppliers_df = st.session_state.get("suppliers_df", pd.DataFrame())
+    suppliers_df = st.session_state.get(f"{key_prefix}_suppliers_df_cache", pd.DataFrame())
 
     return {
         "account_id": account_id,
