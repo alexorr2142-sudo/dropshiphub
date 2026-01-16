@@ -221,22 +221,20 @@ def _safe_imports() -> _ShellDeps:
         ],
     )
 
-    # The rest are required by run_pipeline() but project paths vary.
-    # We try common locations; if missing, we stop with a clear message.
+    # ✅ Correct location per your repo: core/suppliers.py
     enrich_followups_with_suppliers = _require_import(
         "enrich_followups_with_suppliers",
         [
-            lambda: __import__("core.followups", fromlist=["enrich_followups_with_suppliers"]).enrich_followups_with_suppliers,
-            lambda: __import__("followups", fromlist=["enrich_followups_with_suppliers"]).enrich_followups_with_suppliers,
+            lambda: __import__("core.suppliers", fromlist=["enrich_followups_with_suppliers"]).enrich_followups_with_suppliers,
         ],
     )
     add_missing_supplier_contact_exceptions = _require_import(
         "add_missing_supplier_contact_exceptions",
         [
-            lambda: __import__("core.followups", fromlist=["add_missing_supplier_contact_exceptions"]).add_missing_supplier_contact_exceptions,
-            lambda: __import__("followups", fromlist=["add_missing_supplier_contact_exceptions"]).add_missing_supplier_contact_exceptions,
+            lambda: __import__("core.suppliers", fromlist=["add_missing_supplier_contact_exceptions"]).add_missing_supplier_contact_exceptions,
         ],
     )
+
     add_urgency_column = _require_import(
         "add_urgency_column",
         [
@@ -482,7 +480,6 @@ def render_app() -> None:
         if callable(deps.render_sla_escalations_panel):
             deps.render_sla_escalations_panel(escalations_df=view.get("escalations_df", pd.DataFrame()))
         else:
-            # Fail-safe fallback (do not crash if optional UI is missing)
             df = view.get("escalations_df", pd.DataFrame())
             if isinstance(df, pd.DataFrame) and not df.empty:
                 st.dataframe(df, use_container_width=True)
