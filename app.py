@@ -1,52 +1,62 @@
 # app.py
 from __future__ import annotations
 
+import os
+import json
+import io
+import zipfile
+import shutil
+import inspect
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
+
 
 # ============================================================
-# Local pipeline modules (required)
+# BRAND (single source of truth)
 # ============================================================
-try:
-    from normalize import normalize_orders, normalize_shipments, normalize_tracking
-    from reconcile import reconcile_all
-    from explain import enhance_explanations
-except Exception as e:
-    st.set_page_config(page_title="ClearOps", layout="wide")
-    st.title("ClearOps")
-    st.caption("Operational clarity, when it matters.")
-    st.error("Import error: one of your local .py files is missing or has an error.")
-    st.code(str(e))
-    st.stop()
+BRAND_NAME = os.getenv("APP_BRAND_NAME", "ClearOps")
+TAGLINE = os.getenv(
+    "APP_TAGLINE",
+    "Operational clarity — exceptions, follow-ups, and visibility in one hub.",
+)
+
+# MUST be first Streamlit call (best practice)
+st.set_page_config(page_title=BRAND_NAME, layout="wide")
+
 
 # ============================================================
-# Core modules (required)
+# Optional feature imports (do NOT crash if missing)
 # ============================================================
-from core.ops_pack import make_daily_ops_pack_bytes
-from core.scorecards import build_supplier_scorecard_from_run, load_recent_scorecard_history
-from core.styling import add_urgency_column, style_exceptions_table
-from core.suppliers import enrich_followups_with_suppliers, add_missing_supplier_contact_exceptions
-from core.workspaces import workspace_root
-
-# Optional core imports
+render_sla_escalations = None
 IssueTrackerStore = None
-CONTACT_STATUSES = ["Not Contacted", "Contacted", "Waiting", "Escalated", "Resolved"]
-mailto_link = None
+
 build_customer_impact_view = None
+render_customer_impact_view = None
+
+render_customer_comms_ui = None
+render_comms_pack_download = None
+
 build_daily_action_list = None
+render_daily_action_list = None
+
+render_kpi_trends = None
+
 build_supplier_accountability_view = None
+render_supplier_accountability = None
 
 try:
-    from core.issue_tracker import IssueTrackerStore, CONTACT_STATUSES  # type: ignore
+    from ui.sla_escalations_ui import render_sla_escalations  # type: ignore
+except Exception:
+    render_sla_escalations = None
+
+try:
+    from core.issue_tracker import IssueTrackerStore  # type: ignore
 except Exception:
     IssueTrackerStore = None
-
-try:
-    from core.email_utils import mailto_link  # type: ignore
-except Exception:
-    mailto_link = None
 
 try:
     from core.customer_impact import build_customer_impact_view  # type: ignore
@@ -54,358 +64,432 @@ except Exception:
     build_customer_impact_view = None
 
 try:
+    from ui.customer_impact_ui import render_customer_impact_view  # type: ignore
+except Exception:
+    render_customer_impact_view = None
+
+try:
+    from ui.customer_comms_ui import render_customer_comms_ui  # type: ignore
+except Exception:
+    render_customer_comms_ui = None
+
+try:
+    from ui.comms_pack_ui import render_comms_pack_download  # type: ignore
+except Exception:
+    render_comms_pack_download = None
+
+try:
     from core.actions import build_daily_action_list  # type: ignore
 except Exception:
     build_daily_action_list = None
+
+try:
+    from ui.actions_ui import render_daily_action_list  # type: ignore
+except Exception:
+    render_daily_action_list = None
+
+try:
+    from ui.kpi_trends_ui import render_kpi_trends  # type: ignore
+except Exception:
+    render_kpi_trends = None
 
 try:
     from core.supplier_accountability import build_supplier_accountability_view  # type: ignore
 except Exception:
     build_supplier_accountability_view = None
 
-# ============================================================
-# UI modules (optional)
-# ============================================================
-render_sidebar_context = None
-try:
-    from ui.sidebar import render_sidebar_context  # type: ignore
-except Exception:
-    render_sidebar_context = None
-
-ensure_demo_state = None
-render_demo_editor = None
-get_active_raw_inputs = None
-try:
-    from ui.demo import ensure_demo_state, render_demo_editor, get_active_raw_inputs  # type: ignore
-except Exception:
-    ensure_demo_state = None
-    render_demo_editor = None
-    get_active_raw_inputs = None
-
-render_upload_section = None
-try:
-    from ui.upload_ui import render_upload_section  # type: ignore
-except Exception:
-    render_upload_section = None
-
-render_onboarding_checklist = None
-try:
-    from ui.onboarding_ui import render_onboarding_checklist  # type: ignore
-except Exception:
-    render_onboarding_checklist = None
-
-render_template_downloads = None
-try:
-    from ui.templates import render_template_downloads  # type: ignore
-except Exception:
-    render_template_downloads = None
-
-render_diagnostics = None
-try:
-    from ui.diagnostics_ui import render_diagnostics  # type: ignore
-except Exception:
-    render_diagnostics = None
-
-# Optional: dedicated ops triage component (DO NOT name-collide with view wrapper)
-render_ops_triage_component = None
-try:
-    from ui.triage_ui import render_ops_triage as render_ops_triage_component  # type: ignore
-except Exception:
-    render_ops_triage_component = None
-
-render_workspaces_sidebar_and_maybe_override_outputs = None
-try:
-    from ui.workspaces_ui import render_workspaces_sidebar_and_maybe_override_outputs  # type: ignore
-except Exception:
-    render_workspaces_sidebar_and_maybe_override_outputs = None
-
-apply_issue_tracker = None
-render_issue_tracker_maintenance = None
-try:
-    from ui.issue_tracker_ui import apply_issue_tracker, render_issue_tracker_maintenance  # type: ignore
-except Exception:
-    apply_issue_tracker = None
-    render_issue_tracker_maintenance = None
-
-render_sla_escalations = None
-try:
-    from ui.sla_escalations_ui import render_sla_escalations  # type: ignore
-except Exception:
-    render_sla_escalations = None
-
-render_customer_comms_ui = None
-try:
-    from ui.customer_comms_ui import render_customer_comms_ui  # type: ignore
-except Exception:
-    render_customer_comms_ui = None
-
-render_comms_pack_download = None
-try:
-    from ui.comms_pack_ui import render_comms_pack_download  # type: ignore
-except Exception:
-    render_comms_pack_download = None
-
-render_kpi_trends = None
-try:
-    from ui.kpi_trends_ui import render_kpi_trends  # type: ignore
-except Exception:
-    render_kpi_trends = None
-
-render_daily_action_list = None
-try:
-    from ui.actions_ui import render_daily_action_list  # type: ignore
-except Exception:
-    render_daily_action_list = None
-
-render_supplier_accountability = None
 try:
     from ui.supplier_accountability_ui import render_supplier_accountability  # type: ignore
 except Exception:
     render_supplier_accountability = None
 
-render_supplier_followups_tab = None
+
+# --- Local modules (your repo files) ---
+# IMPORTANT: If these imports fail, we still show ClearOps branding.
 try:
-    from ui.supplier_followups_ui import render_supplier_followups_tab  # type: ignore
-except Exception:
-    render_supplier_followups_tab = None
+    from normalize import normalize_orders, normalize_shipments, normalize_tracking
+    from reconcile import reconcile_all
+    from explain import enhance_explanations
+except Exception as e:
+    st.title(BRAND_NAME)
+    st.caption(TAGLINE)
+    st.error("Import error: one of your local .py files is missing or has an error.")
+    st.code(str(e))
+    st.stop()
 
-render_exceptions_queue = None
-try:
-    from ui.exceptions_ui import render_exceptions_queue  # type: ignore
-except Exception:
-    render_exceptions_queue = None
-
-# ============================================================
-# Internal section helpers
-# ============================================================
-from ui.app_helpers import mailto_fallback
-from ui.app_inputs import render_start_here, render_upload_and_templates, resolve_raw_inputs
-from ui.app_pipeline import run_pipeline
-from ui.app_views import (
-    render_dashboard,
-    render_ops_triage as render_ops_triage_view,
-    render_ops_outreach_comms,
-    render_exceptions_queue_section,
-    render_supplier_scorecards,
-    render_sla_escalations_panel,
-)
 
 # ============================================================
-# Page setup
+# Helpers
 # ============================================================
-st.set_page_config(page_title="ClearOps", layout="wide")
-st.title("ClearOps")
-st.caption("Operational clarity, when it matters.")
+def copy_button(text: str, label: str, key: str):
+    safe_text = (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace("`", "\\`")
+        .replace("${", "\\${")
+    )
+    html = f"""
+    <div style="margin: 0.25rem 0;">
+      <button
+        id="btn-{key}"
+        style="
+          padding: 0.45rem 0.75rem;
+          border-radius: 0.5rem;
+          border: 1px solid rgba(49, 51, 63, 0.2);
+          background: white;
+          cursor: pointer;
+          font-size: 0.9rem;
+        "
+        onclick="navigator.clipboard.writeText(`{safe_text}`)
+          .then(() => {{
+            const b = document.getElementById('btn-{key}');
+            const old = b.innerText;
+            b.innerText = 'Copied ✅';
+            setTimeout(() => b.innerText = old, 1200);
+          }})
+          .catch(() => alert('Copy failed. Your browser may block clipboard access.'));"
+      >
+        {label}
+      </button>
+    </div>
+    """
+    components.html(html, height=55)
 
-# ============================================================
-# Paths
-# ============================================================
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-WORKSPACES_DIR = DATA_DIR / "workspaces"
-WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
+def call_with_accepted_kwargs(fn, **kwargs):
+    """Calls fn with only the kwargs it actually accepts."""
+    sig = inspect.signature(fn)
+    accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    return fn(**accepted)
 
-SUPPLIERS_DIR = DATA_DIR / "suppliers"
-SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ============================================================
-# Sidebar context (tenant/defaults/demo/suppliers)
-# ============================================================
-if callable(render_sidebar_context):
-    ctx = render_sidebar_context(DATA_DIR, WORKSPACES_DIR, SUPPLIERS_DIR)
-else:
-    with st.sidebar:
-        st.header("Tenant")
-        account_id = st.text_input("account_id", value="demo_account", key="tenant_account_id")
-        store_id = st.text_input("store_id", value="demo_store", key="tenant_store_id")
-        platform_hint = st.selectbox("platform hint", ["shopify", "amazon", "etsy", "other"], index=0)
+def add_urgency_column(exceptions_df: pd.DataFrame) -> pd.DataFrame:
+    df = exceptions_df.copy()
 
-        st.header("Defaults")
-        default_currency = st.text_input("Default currency", value="USD", key="defaults_currency")
-        default_promised_ship_days = st.number_input(
-            "Default promised ship days (SLA)",
-            min_value=1,
-            max_value=30,
-            value=3,
-            key="defaults_sla_days",
+    def classify_row(row) -> str:
+        issue_type = str(row.get("issue_type", "")).lower()
+        explanation = str(row.get("explanation", "")).lower()
+        next_action = str(row.get("next_action", "")).lower()
+        risk = str(row.get("customer_risk", "")).lower()
+        line_status = str(row.get("line_status", "")).lower()
+        blob = " ".join([issue_type, explanation, next_action, risk, line_status])
+
+        critical_terms = [
+            "late", "past due", "overdue", "late unshipped",
+            "missing tracking", "no tracking", "tracking missing",
+            "carrier exception", "exception", "lost", "stuck", "seized",
+            "returned to sender", "address missing", "missing address",
+        ]
+        if any(t in blob for t in critical_terms):
+            return "Critical"
+
+        high_terms = [
+            "partial", "partial shipment",
+            "mismatch", "quantity mismatch",
+            "invalid tracking", "tracking invalid",
+            "carrier unknown", "unknown carrier",
+        ]
+        if any(t in blob for t in high_terms):
+            return "High"
+
+        medium_terms = ["verify", "check", "confirm", "format", "invalid", "missing", "contact"]
+        if any(t in blob for t in medium_terms):
+            return "Medium"
+
+        return "Low"
+
+    df["Urgency"] = df.apply(classify_row, axis=1)
+    df["Urgency"] = pd.Categorical(df["Urgency"], categories=["Critical", "High", "Medium", "Low"], ordered=True)
+    return df
+
+
+def style_exceptions_table(df: pd.DataFrame):
+    if "Urgency" not in df.columns:
+        return df.style
+
+    colors = {
+        "Critical": "background-color: #ffd6d6;",
+        "High": "background-color: #fff1cc;",
+        "Medium": "background-color: #f3f3f3;",
+        "Low": ""
+    }
+
+    def row_style(row):
+        u = str(row.get("Urgency", "Low"))
+        return [colors.get(u, "")] * len(row)
+
+    return df.style.apply(row_style, axis=1)
+
+
+def make_daily_ops_pack_bytes(
+    exceptions: pd.DataFrame,
+    followups: pd.DataFrame,
+    order_rollup: pd.DataFrame,
+    line_status_df: pd.DataFrame,
+    kpis: dict,
+    supplier_scorecards: pd.DataFrame | None = None,
+    customer_impact: pd.DataFrame | None = None,
+) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("exceptions.csv", (exceptions if exceptions is not None else pd.DataFrame()).to_csv(index=False))
+        z.writestr("supplier_followups.csv", (followups if followups is not None else pd.DataFrame()).to_csv(index=False))
+        z.writestr("order_rollup.csv", (order_rollup if order_rollup is not None else pd.DataFrame()).to_csv(index=False))
+        z.writestr("order_line_status.csv", (line_status_df if line_status_df is not None else pd.DataFrame()).to_csv(index=False))
+
+        if supplier_scorecards is not None and not supplier_scorecards.empty:
+            z.writestr("supplier_scorecards.csv", supplier_scorecards.to_csv(index=False))
+
+        if customer_impact is not None and not customer_impact.empty:
+            z.writestr("customer_impact.csv", customer_impact.to_csv(index=False))
+
+        z.writestr("kpis.json", json.dumps(kpis if isinstance(kpis, dict) else {}, indent=2))
+        z.writestr(
+            "README.txt",
+            (
+                f"{BRAND_NAME} — Daily Ops Pack\n"
+                "Files:\n"
+                " - exceptions.csv: SKU-level issues to action\n"
+                " - supplier_followups.csv: supplier messages to send (OPEN/unresolved)\n"
+                " - order_rollup.csv: one row per order\n"
+                " - order_line_status.csv: full line-level status\n"
+                " - supplier_scorecards.csv: per-supplier performance snapshot (if available)\n"
+                " - customer_impact.csv: customer comms candidates (if available)\n"
+                " - kpis.json: dashboard KPI snapshot\n"
+            ),
         )
+    buf.seek(0)
+    return buf.read()
 
-        demo_mode = st.toggle("Use demo data (sticky)", key="demo_mode_fallback")
-        suppliers_df = pd.DataFrame()
 
-    ctx = {
+# -------------------------------
+# Access gate
+# -------------------------------
+def _parse_allowed_emails_from_env() -> list[str]:
+    raw = os.getenv("DSH_ALLOWED_EMAILS", "").strip()
+    if not raw:
+        return []
+    return [e.strip().lower() for e in raw.split(",") if e.strip()]
+
+
+def get_allowed_emails() -> list[str]:
+    allowed = []
+    try:
+        allowed = st.secrets.get("ALLOWED_EMAILS", [])
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        allowed = [str(e).strip().lower() for e in allowed if str(e).strip()]
+    except Exception:
+        allowed = []
+    allowed_env = _parse_allowed_emails_from_env()
+    return sorted(set(allowed + allowed_env))
+
+
+def require_email_access_gate():
+    st.subheader("Access")
+    email = st.text_input("Work email", key="auth_email").strip().lower()
+    allowed = get_allowed_emails()
+
+    if allowed:
+        if not email:
+            st.info("Enter your work email to continue.")
+            st.stop()
+        if email not in allowed:
+            st.error("This email is not authorized for early access.")
+            st.caption("Ask the admin to add your email to the allowlist.")
+            st.stop()
+        st.success("Email verified ✅")
+    else:
+        st.caption("Email verification is currently disabled (accepting all emails).")
+
+
+# -------------------------------
+# Workspaces (local disk)
+# -------------------------------
+def _safe_slug(s: str) -> str:
+    s = (s or "").strip()
+    keep = []
+    for ch in s:
+        if ch.isalnum() or ch in ["-", "_", " "]:
+            keep.append(ch)
+    out = "".join(keep).strip().replace(" ", "_")
+    return out[:60] if out else "workspace"
+
+
+def workspace_root(workspaces_dir: Path, account_id: str, store_id: str) -> Path:
+    return workspaces_dir / _safe_slug(account_id) / _safe_slug(store_id)
+
+
+def list_runs(ws_root: Path) -> list[dict]:
+    if not ws_root.exists():
+        return []
+    runs = []
+    for workspace_dir in ws_root.iterdir():
+        if not workspace_dir.is_dir():
+            continue
+        for run_dir in workspace_dir.iterdir():
+            if not run_dir.is_dir():
+                continue
+            meta_path = run_dir / "meta.json"
+            meta = {}
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    meta = {}
+            created_at = meta.get("created_at", run_dir.name)
+            runs.append(
+                {
+                    "workspace_name": workspace_dir.name,
+                    "run_id": run_dir.name,
+                    "path": run_dir,
+                    "created_at": created_at,
+                    "meta": meta,
+                }
+            )
+    runs.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return runs
+
+
+def save_run(
+    ws_root: Path,
+    workspace_name: str,
+    account_id: str,
+    store_id: str,
+    platform_hint: str,
+    orders: pd.DataFrame,
+    shipments: pd.DataFrame,
+    tracking: pd.DataFrame,
+    exceptions: pd.DataFrame,
+    followups_full: pd.DataFrame,
+    order_rollup: pd.DataFrame,
+    line_status_df: pd.DataFrame,
+    kpis: dict,
+    suppliers_df: pd.DataFrame,
+) -> Path:
+    workspace_name = _safe_slug(workspace_name)
+    run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    run_dir = ws_root / workspace_name / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    exceptions.to_csv(run_dir / "exceptions.csv", index=False)
+    followups_full.to_csv(run_dir / "followups.csv", index=False)
+    order_rollup.to_csv(run_dir / "order_rollup.csv", index=False)
+    line_status_df.to_csv(run_dir / "line_status.csv", index=False)
+
+    orders.to_csv(run_dir / "orders_normalized.csv", index=False)
+    shipments.to_csv(run_dir / "shipments_normalized.csv", index=False)
+    tracking.to_csv(run_dir / "tracking_normalized.csv", index=False)
+
+    if suppliers_df is not None and not suppliers_df.empty:
+        suppliers_df.to_csv(run_dir / "suppliers.csv", index=False)
+
+    meta = {
+        "created_at": run_id,
+        "workspace_name": workspace_name,
         "account_id": account_id,
         "store_id": store_id,
         "platform_hint": platform_hint,
-        "default_currency": default_currency,
-        "default_promised_ship_days": int(default_promised_ship_days),
-        "suppliers_df": suppliers_df,
-        "demo_mode": bool(demo_mode),
+        "kpis": kpis,
+        "row_counts": {
+            "orders": int(len(orders)),
+            "shipments": int(len(shipments)),
+            "tracking": int(len(tracking)),
+            "exceptions": int(len(exceptions)),
+            "followups": int(len(followups_full)),
+            "order_rollup": int(len(order_rollup)),
+            "line_status": int(len(line_status_df)),
+            "suppliers": int(len(suppliers_df)) if suppliers_df is not None else 0,
+        },
     }
+    (run_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return run_dir
 
-account_id = ctx["account_id"]
-store_id = ctx["store_id"]
-platform_hint = ctx["platform_hint"]
-default_currency = ctx["default_currency"]
-default_promised_ship_days = int(ctx["default_promised_ship_days"])
-suppliers_df = ctx.get("suppliers_df", pd.DataFrame())
-demo_mode_active = bool(ctx.get("demo_mode", False))
+
+def load_run(run_dir: Path) -> dict:
+    out = {"meta": {}}
+    meta_path = run_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            out["meta"] = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            out["meta"] = {}
+
+    def _read_csv(name: str) -> pd.DataFrame:
+        p = run_dir / name
+        return pd.read_csv(p) if p.exists() else pd.DataFrame()
+
+    out["exceptions"] = _read_csv("exceptions.csv")
+    out["followups"] = _read_csv("followups.csv")
+    out["order_rollup"] = _read_csv("order_rollup.csv")
+    out["line_status_df"] = _read_csv("line_status.csv")
+    out["orders"] = _read_csv("orders_normalized.csv")
+    out["shipments"] = _read_csv("shipments_normalized.csv")
+    out["tracking"] = _read_csv("tracking_normalized.csv")
+    out["suppliers_df"] = _read_csv("suppliers.csv")
+    return out
+
+
+def make_run_zip_bytes(run_dir: Path) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in run_dir.rglob("*"):
+            if p.is_file():
+                z.write(p, arcname=p.relative_to(run_dir))
+    buf.seek(0)
+    return buf.read()
+
+
+def delete_run_dir(run_dir: Path) -> None:
+    if run_dir.exists() and run_dir.is_dir():
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def build_run_history_df(runs: list[dict]) -> pd.DataFrame:
+    rows = []
+    for r in runs:
+        meta = r.get("meta", {}) or {}
+        counts = meta.get("row_counts", {}) or {}
+        kpis = meta.get("kpis", {}) or {}
+        rows.append(
+            {
+                "workspace": r.get("workspace_name", ""),
+                "run_id": r.get("run_id", ""),
+                "created_at": meta.get("created_at", r.get("created_at", "")),
+                "exceptions": counts.get("exceptions", ""),
+                "followups": counts.get("followups", ""),
+                "suppliers": counts.get("suppliers", ""),
+                "pct_unshipped": kpis.get("pct_unshipped", ""),
+                "pct_late_unshipped": kpis.get("pct_late_unshipped", ""),
+            }
+        )
+    df = pd.DataFrame(rows)
+    if not df.empty and "created_at" in df.columns:
+        df = df.sort_values("created_at", ascending=False)
+    return df
+
 
 # ============================================================
-# Diagnostics UI (optional)
+# Main header (ALWAYS ClearOps now)
 # ============================================================
-diag = {
-    "render_sla_escalations": render_sla_escalations is not None,
-    "IssueTrackerStore": IssueTrackerStore is not None,
-    "apply_issue_tracker": apply_issue_tracker is not None,
-    "render_supplier_followups_tab": render_supplier_followups_tab is not None,
-    "mailto_link": mailto_link is not None,
-    "build_customer_impact_view": build_customer_impact_view is not None,
-    "render_customer_comms_ui": render_customer_comms_ui is not None,
-    "render_comms_pack_download": render_comms_pack_download is not None,
-    "build_daily_action_list": build_daily_action_list is not None,
-    "render_daily_action_list": render_daily_action_list is not None,
-    "render_kpi_trends": render_kpi_trends is not None,
-    "build_supplier_accountability_view": build_supplier_accountability_view is not None,
-    "render_supplier_accountability": render_supplier_accountability is not None,
-    "render_upload_section": render_upload_section is not None,
-    "render_onboarding_checklist": render_onboarding_checklist is not None,
-    "render_template_downloads": render_template_downloads is not None,
-    "render_ops_triage_component": render_ops_triage_component is not None,
-    "render_exceptions_queue": render_exceptions_queue is not None,
-}
-if callable(render_diagnostics):
-    render_diagnostics(
-        workspaces_dir=WORKSPACES_DIR,
-        account_id=account_id,
-        store_id=store_id,
-        diag=diag,
-        expanded=False,
-    )
+st.title(BRAND_NAME)
+st.caption(TAGLINE)
 
-# ============================================================
-# Onboarding checklist (optional)
-# ============================================================
-if callable(render_onboarding_checklist):
-    render_onboarding_checklist(expanded=True)
-
-# ============================================================
-# Start + Uploads
-# ============================================================
-render_start_here(
-    data_dir=DATA_DIR,
-    demo_mode_active=demo_mode_active,
-    ensure_demo_state=ensure_demo_state,
-    render_demo_editor=render_demo_editor,
+# A tiny "build stamp" so you can tell Streamlit deployed the latest code
+st.caption(
+    f"Build stamp: `{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%SZ')}` "
+    f"(repo: `{os.getenv('STREAMLIT_APP_NAME','')}`)"
 )
 
-uploads = render_upload_and_templates(
-    render_upload_section=render_upload_section,
-    render_template_downloads=render_template_downloads,
-)
+ACCESS_CODE = os.getenv("DSH_ACCESS_CODE", "early2026")
+code = st.text_input("Enter early access code", type="password", key="early_access_code")
+if code != ACCESS_CODE:
+    st.info("This app is currently in early access. Enter your code to continue.")
+    st.stop()
 
-raw_orders, raw_shipments, raw_tracking = resolve_raw_inputs(
-    demo_mode_active=demo_mode_active,
-    data_dir=DATA_DIR,
-    uploads=uploads,
-    get_active_raw_inputs=get_active_raw_inputs,
-)
+require_email_access_gate()
 
-# ============================================================
-# Pipeline
-# ============================================================
-run = run_pipeline(
-    raw_orders=raw_orders,
-    raw_shipments=raw_shipments,
-    raw_tracking=raw_tracking,
-    account_id=account_id,
-    store_id=store_id,
-    platform_hint=platform_hint,
-    default_currency=default_currency,
-    default_promised_ship_days=default_promised_ship_days,
-    suppliers_df=suppliers_df,
-    workspaces_dir=WORKSPACES_DIR,
-    normalize_orders=normalize_orders,
-    normalize_shipments=normalize_shipments,
-    normalize_tracking=normalize_tracking,
-    reconcile_all=reconcile_all,
-    enhance_explanations=enhance_explanations,
-    enrich_followups_with_suppliers=enrich_followups_with_suppliers,
-    add_missing_supplier_contact_exceptions=add_missing_supplier_contact_exceptions,
-    add_urgency_column=add_urgency_column,
-    build_supplier_scorecard_from_run=build_supplier_scorecard_from_run,
-    make_daily_ops_pack_bytes=make_daily_ops_pack_bytes,
-    workspace_root=workspace_root,
-    render_sla_escalations=render_sla_escalations,
-    apply_issue_tracker=apply_issue_tracker,
-    render_issue_tracker_maintenance=render_issue_tracker_maintenance,
-    IssueTrackerStore=IssueTrackerStore,
-    build_customer_impact_view=build_customer_impact_view,
-    mailto_link=mailto_link,
-    render_workspaces_sidebar_and_maybe_override_outputs=render_workspaces_sidebar_and_maybe_override_outputs,
-)
-
-# ============================================================
-# Views
-# ============================================================
-render_dashboard(
-    kpis=run["kpis"] if isinstance(run.get("kpis"), dict) else {},
-    exceptions=run["exceptions"],
-    followups_open=run["followups_open"],
-    workspaces_dir=WORKSPACES_DIR,
-    account_id=account_id,
-    store_id=store_id,
-    build_daily_action_list=build_daily_action_list,
-    render_daily_action_list=render_daily_action_list,
-    render_kpi_trends=render_kpi_trends,
-)
-
-render_ops_triage_view(
-    exceptions=run["exceptions"],
-    ops_pack_bytes=run["ops_pack_bytes"],
-    pack_name=run["pack_name"],
-    style_exceptions_table=style_exceptions_table,
-    render_ops_triage_component=render_ops_triage_component,
-)
-
-render_ops_outreach_comms(
-    followups_open=run["followups_open"],
-    customer_impact=run["customer_impact"],
-    scorecard=run["scorecard"],
-    ws_root=run["ws_root"],
-    issue_tracker_path=run["issue_tracker_path"],
-    contact_statuses=CONTACT_STATUSES
-    if isinstance(CONTACT_STATUSES, list)
-    else ["Not Contacted", "Contacted", "Waiting", "Escalated", "Resolved"],
-    mailto_link_fn=mailto_link if callable(mailto_link) else mailto_fallback,
-    build_supplier_accountability_view=build_supplier_accountability_view,
-    render_supplier_accountability=render_supplier_accountability,
-    render_supplier_followups_tab=render_supplier_followups_tab,
-    render_customer_comms_ui=render_customer_comms_ui,
-    render_comms_pack_download=render_comms_pack_download,
-    account_id=account_id,
-    store_id=store_id,
-)
-
-render_exceptions_queue_section(
-    exceptions=run["exceptions"],
-    style_exceptions_table=style_exceptions_table,
-    render_exceptions_queue=render_exceptions_queue,
-)
-
-list_runs = None
-try:
-    from core.workspaces import list_runs  # type: ignore
-except Exception:
-    list_runs = None
-
-render_supplier_scorecards(
-    scorecard=run["scorecard"],
-    ws_root=run["ws_root"],
-    load_recent_scorecard_history=load_recent_scorecard_history,
-    list_runs=list_runs,
-)
-
-render_sla_escalations_panel(escalations_df=run.get("escalations_df", pd.DataFrame()))
+# ------------------------------------------------------------
+# The rest of your file can remain exactly the same below
+# (Paths, sidebar, demo mode, normalize, reconcile, UI, etc.)
+# ------------------------------------------------------------
