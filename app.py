@@ -28,10 +28,7 @@ except Exception as e:
 from core.ops_pack import make_daily_ops_pack_bytes
 from core.scorecards import build_supplier_scorecard_from_run, load_recent_scorecard_history
 from core.styling import add_urgency_column, style_exceptions_table, copy_button
-from core.suppliers import (
-    enrich_followups_with_suppliers,
-    add_missing_supplier_contact_exceptions,
-)
+from core.suppliers import enrich_followups_with_suppliers, add_missing_supplier_contact_exceptions
 from core.workspaces import workspace_root
 
 # Optional core imports
@@ -67,17 +64,8 @@ try:
 except Exception:
     build_supplier_accountability_view = None
 
-# Optional timeline
-TimelineStore = None
-timeline_path_for_ws_root = None
-try:
-    from core.timeline_store import TimelineStore, timeline_path_for_ws_root  # type: ignore
-except Exception:
-    TimelineStore = None
-    timeline_path_for_ws_root = None
-
 # ============================================================
-# UI modules
+# UI modules (optional)
 # ============================================================
 render_sidebar_context = None
 try:
@@ -131,7 +119,7 @@ try:
 except Exception:
     render_workspaces_sidebar_and_maybe_override_outputs = None
 
-# Issue tracker (with helper wrapper)
+# NEW: issue tracker utilities (apply_issue_tracker + maintenance)
 apply_issue_tracker = None
 render_issue_tracker_maintenance = None
 try:
@@ -176,20 +164,19 @@ try:
 except Exception:
     render_supplier_accountability = None
 
-# NEW: Supplier follow-ups tab (dedicated module)
+# NEW: supplier followups tab (timeline + bulk ownership etc.)
 render_supplier_followups_tab = None
 try:
     from ui.supplier_followups_ui import render_supplier_followups_tab  # type: ignore
 except Exception:
     render_supplier_followups_tab = None
 
-# Timeline panel UI (optional)
-render_timeline_panel = None
+# Optional: exceptions queue module (if you want to use it instead of inline)
+render_exceptions_queue = None
 try:
-    from ui.timeline_ui import render_timeline_panel  # type: ignore
+    from ui.exceptions_ui import render_exceptions_queue  # type: ignore
 except Exception:
-    render_timeline_panel = None
-
+    render_exceptions_queue = None
 
 # ============================================================
 # Helpers
@@ -207,19 +194,6 @@ def _mailto_fallback(to: str, subject: str, body: str) -> str:
 
 def _is_empty_df(x) -> bool:
     return (x is None) or (not isinstance(x, pd.DataFrame)) or x.empty
-
-
-def _log_run_event(ws_root: Path, event_type: str, summary: str, data: dict | None = None) -> None:
-    """
-    Best-effort system-level timeline logging. Never raises.
-    """
-    try:
-        if TimelineStore is None or timeline_path_for_ws_root is None:
-            return
-        tl = TimelineStore(timeline_path_for_ws_root(ws_root))
-        tl.log(scope="system", event_type=event_type, summary=summary, data=data or {}, actor="system")
-    except Exception:
-        return
 
 
 # ============================================================
@@ -288,17 +262,14 @@ default_promised_ship_days = int(ctx["default_promised_ship_days"])
 suppliers_df = ctx.get("suppliers_df", pd.DataFrame())
 demo_mode_active = bool(ctx.get("demo_mode", False))
 
-# Per-tenant workspace root
-ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
-ws_root.mkdir(parents=True, exist_ok=True)
-ISSUE_TRACKER_PATH = Path(ws_root) / "issue_tracker.json"
-
 # ============================================================
 # Diagnostics UI (optional)
 # ============================================================
 diag = {
     "render_sla_escalations": render_sla_escalations is not None,
     "IssueTrackerStore": IssueTrackerStore is not None,
+    "apply_issue_tracker": apply_issue_tracker is not None,
+    "render_supplier_followups_tab": render_supplier_followups_tab is not None,
     "mailto_link": mailto_link is not None,
     "build_customer_impact_view": build_customer_impact_view is not None,
     "render_customer_comms_ui": render_customer_comms_ui is not None,
@@ -312,8 +283,7 @@ diag = {
     "render_onboarding_checklist": render_onboarding_checklist is not None,
     "render_template_downloads": render_template_downloads is not None,
     "render_ops_triage": render_ops_triage is not None,
-    "render_supplier_followups_tab": render_supplier_followups_tab is not None,
-    "render_timeline_panel": render_timeline_panel is not None,
+    "render_exceptions_queue": render_exceptions_queue is not None,
 }
 if callable(render_diagnostics):
     render_diagnostics(
@@ -323,13 +293,6 @@ if callable(render_diagnostics):
         diag=diag,
         expanded=False,
     )
-
-# ============================================================
-# Sidebar maintenance (issue tracker)
-# ============================================================
-with st.sidebar:
-    if callable(render_issue_tracker_maintenance) and (IssueTrackerStore is not None):
-        render_issue_tracker_maintenance(ISSUE_TRACKER_PATH, default_prune_days=30)
 
 # ============================================================
 # Onboarding checklist (optional)
@@ -367,6 +330,7 @@ else:
         f_shipments = st.file_uploader("Shipments CSV (supplier export)", type=["csv"], key="uploader_shipments")
     with c3:
         f_tracking = st.file_uploader("Tracking CSV\n(optional)", type=["csv"], key="uploader_tracking")
+
     uploads = type(
         "U",
         (),
@@ -424,33 +388,16 @@ if _is_empty_df(raw_orders) or _is_empty_df(raw_shipments):
 
     st.error("Cannot run reconciliation without Orders + Shipments data (missing required columns like order_id and sku).")
 
-    if demo_mode_active:
-        st.info(
-            "Demo Mode is ON, but demo data is empty. "
-            "This means the demo loader didn't populate demo_raw_orders/demo_raw_shipments."
-        )
-        st.caption("Next fix is in ui/demo.py (demo loader).")
-    else:
-        st.info("Please upload both **Orders CSV** and **Shipments CSV** in the Upload section.")
-
     with st.expander("Debug (raw input shapes / columns)", expanded=False):
         if isinstance(raw_orders, pd.DataFrame):
             st.write("raw_orders shape:", raw_orders.shape)
             st.write("raw_orders columns:", list(raw_orders.columns))
-        else:
-            st.write("raw_orders:", type(raw_orders))
-
         if isinstance(raw_shipments, pd.DataFrame):
             st.write("raw_shipments shape:", raw_shipments.shape)
             st.write("raw_shipments columns:", list(raw_shipments.columns))
-        else:
-            st.write("raw_shipments:", type(raw_shipments))
-
         if isinstance(raw_tracking, pd.DataFrame):
             st.write("raw_tracking shape:", raw_tracking.shape)
             st.write("raw_tracking columns:", list(raw_tracking.columns))
-        else:
-            st.write("raw_tracking:", type(raw_tracking))
 
     st.stop()
 
@@ -493,15 +440,12 @@ try:
     line_status_df, exceptions, followups, order_rollup, kpis = reconcile_all(orders, shipments, tracking)
 except Exception as e:
     st.error("Reconciliation failed. Showing debug details below.")
-
     st.markdown("### Debug: normalized inputs")
     st.write("orders columns:", list(orders.columns))
     st.write("shipments columns:", list(shipments.columns))
     st.write("tracking columns:", list(tracking.columns) if isinstance(tracking, pd.DataFrame) else tracking)
-
     st.markdown("### Error")
     st.code(str(e))
-
     with st.expander("Preview orders (head)", expanded=False):
         st.dataframe(orders.head(5), use_container_width=True)
     with st.expander("Preview shipments (head)", expanded=False):
@@ -509,19 +453,7 @@ except Exception as e:
     with st.expander("Preview tracking (head)", expanded=False):
         if isinstance(tracking, pd.DataFrame):
             st.dataframe(tracking.head(5), use_container_width=True)
-
     st.stop()
-
-# System timeline event (best-effort)
-_log_run_event(
-    ws_root,
-    event_type="run.reconciled",
-    summary="Reconciliation completed",
-    data={
-        "exceptions": int(len(exceptions)) if isinstance(exceptions, pd.DataFrame) else 0,
-        "followups": int(len(followups)) if isinstance(followups, pd.DataFrame) else 0,
-    },
-)
 
 # Explain enhancements (best-effort)
 try:
@@ -541,9 +473,11 @@ if exceptions is not None and not exceptions.empty and "Urgency" not in exceptio
 scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
 
 # ============================================================
-# SLA Escalations + followups_full
+# SLA Escalations + followups_full/open
 # ============================================================
 followups_full = followups.copy() if isinstance(followups, pd.DataFrame) else pd.DataFrame()
+followups_open = followups_full.copy()
+followups_open_enriched = followups_open.copy()
 escalations_df = pd.DataFrame()
 
 if render_sla_escalations is not None:
@@ -558,23 +492,27 @@ if render_sla_escalations is not None:
     except Exception:
         pass
 
-# ============================================================
-# Issue Tracker wrapper (OPEN + enriched)
-# ============================================================
-followups_open = followups_full.copy()
-followups_open_enriched = followups_open.copy()
+# Per-tenant issue tracker path
+ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
+ws_root.mkdir(parents=True, exist_ok=True)
+ISSUE_TRACKER_PATH = Path(ws_root) / "issue_tracker.json"
 
+# Sidebar maintenance
+with st.sidebar:
+    if callable(render_issue_tracker_maintenance) and (IssueTrackerStore is not None):
+        render_issue_tracker_maintenance(ISSUE_TRACKER_PATH, default_prune_days=30)
+
+# Apply issue tracker (preferred)
 if callable(apply_issue_tracker):
     try:
         it = apply_issue_tracker(ws_root=ws_root, followups_full=followups_full)
-        ISSUE_TRACKER_PATH = it["issue_tracker_path"]
         followups_full = it["followups_full"]
         followups_open = it["followups_open"]
         followups_open_enriched = it.get("followups_open_enriched", followups_open)
     except Exception:
-        pass
+        followups_open = followups_full.copy()
+        followups_open_enriched = followups_open.copy()
 else:
-    # fallback: if no wrapper, keep current behavior
     followups_open = followups_full.copy()
     followups_open_enriched = followups_open.copy()
 
@@ -603,18 +541,11 @@ ops_pack_bytes = make_daily_ops_pack_bytes(
     supplier_scorecards=scorecard,
 )
 
-_log_run_event(
-    ws_root,
-    event_type="run.ops_pack_generated",
-    summary="Ops pack generated",
-    data={"pack_name": pack_name},
-)
-
 # ============================================================
 # Workspaces sidebar (optional UI module)
 # ============================================================
 if callable(render_workspaces_sidebar_and_maybe_override_outputs):
-    exceptions, followups_full2, order_rollup, line_status_df, suppliers_df = render_workspaces_sidebar_and_maybe_override_outputs(
+    exceptions, followups_ws, order_rollup, line_status_df, suppliers_df = render_workspaces_sidebar_and_maybe_override_outputs(
         workspaces_dir=WORKSPACES_DIR,
         account_id=account_id,
         store_id=store_id,
@@ -630,19 +561,21 @@ if callable(render_workspaces_sidebar_and_maybe_override_outputs):
         suppliers_df=suppliers_df if suppliers_df is not None else pd.DataFrame(),
     )
 
-    if isinstance(followups_full2, pd.DataFrame):
-        followups_full = followups_full2.copy()
-
-    # Re-apply issue tracker after override
-    if callable(apply_issue_tracker):
-        try:
-            it = apply_issue_tracker(ws_root=ws_root, followups_full=followups_full)
-            ISSUE_TRACKER_PATH = it["issue_tracker_path"]
-            followups_full = it["followups_full"]
-            followups_open = it["followups_open"]
-            followups_open_enriched = it.get("followups_open_enriched", followups_open)
-        except Exception:
-            pass
+    # If workspace UI overrides followups, re-apply issue tracker
+    if isinstance(followups_ws, pd.DataFrame):
+        followups_full = followups_ws.copy()
+        if callable(apply_issue_tracker):
+            try:
+                it = apply_issue_tracker(ws_root=ws_root, followups_full=followups_full)
+                followups_full = it["followups_full"]
+                followups_open = it["followups_open"]
+                followups_open_enriched = it.get("followups_open_enriched", followups_open)
+            except Exception:
+                followups_open = followups_full.copy()
+                followups_open_enriched = followups_open.copy()
+        else:
+            followups_open = followups_full.copy()
+            followups_open_enriched = followups_open.copy()
 
 # ============================================================
 # Dashboard KPIs
@@ -671,20 +604,6 @@ if render_kpi_trends is not None:
         pass
 
 # ============================================================
-# Optional: Timeline (system)
-# ============================================================
-if callable(render_timeline_panel):
-    try:
-        render_timeline_panel(
-            timeline_path=(ws_root / "timeline.jsonl"),
-            title="Timeline (System + Issues)",
-            limit=100,
-            key_prefix="timeline_system",
-        )
-    except Exception:
-        pass
-
-# ============================================================
 # Ops Triage
 # ============================================================
 st.divider()
@@ -705,19 +624,25 @@ st.subheader("Ops Outreach (Comms)")
 tab1, tab2, tab3 = st.tabs(["Supplier Follow-ups", "Customer Emails", "Comms Pack"])
 
 with tab1:
-    if callable(render_supplier_followups_tab):
+    # NEW: use supplier_followups_ui.py
+    if callable(render_supplier_followups_tab) and isinstance(followups_open, pd.DataFrame):
         render_supplier_followups_tab(
             followups_open=followups_open,
             issue_tracker_path=ISSUE_TRACKER_PATH,
-            contact_statuses=CONTACT_STATUSES,
+            contact_statuses=CONTACT_STATUSES if isinstance(CONTACT_STATUSES, list) else ["Not Contacted", "Contacted", "Waiting", "Escalated", "Resolved"],
             mailto_link_fn=mailto_link if callable(mailto_link) else _mailto_fallback,
-            scorecard=scorecard,
-            build_supplier_accountability_view=build_supplier_accountability_view,
-            render_supplier_accountability=render_supplier_accountability,
+            scorecard=scorecard if isinstance(scorecard, pd.DataFrame) else None,
+            build_supplier_accountability_view=build_supplier_accountability_view if callable(build_supplier_accountability_view) else None,
+            render_supplier_accountability=render_supplier_accountability if callable(render_supplier_accountability) else None,
             key_prefix="supplier_followups",
         )
     else:
-        st.warning("ui/supplier_followups_ui.py is not available.")
+        # fallback (won't break app)
+        st.caption("Supplier follow-ups UI module not available.")
+        if followups_open is None or followups_open.empty:
+            st.info("No supplier follow-ups needed.")
+        else:
+            st.dataframe(followups_open, use_container_width=True, height=260)
 
 with tab2:
     st.caption("Customer-facing updates (email-first).")
@@ -765,89 +690,73 @@ with tab3:
 # Exceptions Queue
 # ============================================================
 st.divider()
-st.subheader("Exceptions Queue (Action this first)")
-
-if exceptions is None or exceptions.empty:
-    st.info("No exceptions found 🎉")
+if callable(render_exceptions_queue):
+    render_exceptions_queue(exceptions, key_prefix="exq", height=420)
 else:
-    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+    st.subheader("Exceptions Queue (Action this first)")
+    if exceptions is None or exceptions.empty:
+        st.info("No exceptions found 🎉")
+    else:
+        fcol1, fcol2, fcol3, fcol4 = st.columns(4)
 
-    with fcol1:
-        issue_types = (
-            sorted(exceptions["issue_type"].dropna().unique().tolist())
-            if "issue_type" in exceptions.columns
-            else []
+        with fcol1:
+            issue_types = sorted(exceptions["issue_type"].dropna().unique().tolist()) if "issue_type" in exceptions.columns else []
+            issue_filter = st.multiselect("Issue types", issue_types, default=issue_types, key="exq_issue_types")
+
+        with fcol2:
+            countries = sorted(
+                [c for c in exceptions.get("customer_country", pd.Series([], dtype="object")).dropna().unique().tolist() if str(c).strip() != ""]
+            )
+            country_filter = st.multiselect("Customer country", countries, default=countries, key="exq_countries")
+
+        with fcol3:
+            suppliers = sorted(
+                [s for s in exceptions.get("supplier_name", pd.Series([], dtype="object")).dropna().unique().tolist() if str(s).strip() != ""]
+            )
+            supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers, key="exq_suppliers")
+
+        with fcol4:
+            urgencies = ["Critical", "High", "Medium", "Low"]
+            urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies, key="exq_urgency")
+
+        filtered = exceptions.copy()
+        if issue_filter and "issue_type" in filtered.columns:
+            filtered = filtered[filtered["issue_type"].isin(issue_filter)]
+        if country_filter and "customer_country" in filtered.columns:
+            filtered = filtered[filtered["customer_country"].isin(country_filter)]
+        if supplier_filter and "supplier_name" in filtered.columns:
+            filtered = filtered[filtered["supplier_name"].isin(supplier_filter)]
+        if urgency_filter and "Urgency" in filtered.columns:
+            filtered = filtered[filtered["Urgency"].isin(urgency_filter)]
+
+        sort_cols = [c for c in ["Urgency", "order_id"] if c in filtered.columns]
+        if sort_cols:
+            filtered = filtered.sort_values(sort_cols, ascending=True)
+
+        preferred_cols = [
+            "Urgency",
+            "order_id",
+            "sku",
+            "issue_type",
+            "customer_country",
+            "supplier_name",
+            "quantity_ordered",
+            "quantity_shipped",
+            "line_status",
+            "explanation",
+            "next_action",
+            "customer_risk",
+        ]
+        show_cols = [c for c in preferred_cols if c in filtered.columns]
+
+        st.dataframe(style_exceptions_table(filtered[show_cols]), use_container_width=True, height=420)
+        st.download_button(
+            "Download Exceptions CSV",
+            data=filtered.to_csv(index=False).encode("utf-8"),
+            file_name="exceptions_queue.csv",
+            mime="text/csv",
+            key="dl_exceptions_csv",
         )
-        issue_filter = st.multiselect("Issue types", issue_types, default=issue_types, key="exq_issue_types")
-
-    with fcol2:
-        countries = sorted(
-            [
-                c
-                for c in exceptions.get("customer_country", pd.Series([], dtype="object"))
-                .dropna()
-                .unique()
-                .tolist()
-                if str(c).strip() != ""
-            ]
-        )
-        country_filter = st.multiselect("Customer country", countries, default=countries, key="exq_countries")
-
-    with fcol3:
-        suppliers = sorted(
-            [
-                s
-                for s in exceptions.get("supplier_name", pd.Series([], dtype="object"))
-                .dropna()
-                .unique()
-                .tolist()
-                if str(s).strip() != ""
-            ]
-        )
-        supplier_filter = st.multiselect("Supplier", suppliers, default=suppliers, key="exq_suppliers")
-
-    with fcol4:
-        urgencies = ["Critical", "High", "Medium", "Low"]
-        urgency_filter = st.multiselect("Urgency", urgencies, default=urgencies, key="exq_urgency")
-
-    filtered = exceptions.copy()
-    if issue_filter and "issue_type" in filtered.columns:
-        filtered = filtered[filtered["issue_type"].isin(issue_filter)]
-    if country_filter and "customer_country" in filtered.columns:
-        filtered = filtered[filtered["customer_country"].isin(country_filter)]
-    if supplier_filter and "supplier_name" in filtered.columns:
-        filtered = filtered[filtered["supplier_name"].isin(supplier_filter)]
-    if urgency_filter and "Urgency" in filtered.columns:
-        filtered = filtered[filtered["Urgency"].isin(urgency_filter)]
-
-    sort_cols = [c for c in ["Urgency", "order_id"] if c in filtered.columns]
-    if sort_cols:
-        filtered = filtered.sort_values(sort_cols, ascending=True)
-
-    preferred_cols = [
-        "Urgency",
-        "order_id",
-        "sku",
-        "issue_type",
-        "customer_country",
-        "supplier_name",
-        "quantity_ordered",
-        "quantity_shipped",
-        "line_status",
-        "explanation",
-        "next_action",
-        "customer_risk",
-    ]
-    show_cols = [c for c in preferred_cols if c in filtered.columns]
-
-    st.dataframe(style_exceptions_table(filtered[show_cols]), use_container_width=True, height=420)
-    st.download_button(
-        "Download Exceptions CSV",
-        data=filtered.to_csv(index=False).encode("utf-8"),
-        file_name="exceptions_queue.csv",
-        mime="text/csv",
-        key="dl_exceptions_csv",
-    )
 
 # ============================================================
 # Supplier Scorecards
@@ -899,7 +808,6 @@ else:
         runs_for_trend = []
         try:
             from core.workspaces import list_runs
-
             runs_for_trend = list_runs(ws_root)
         except Exception:
             runs_for_trend = []
@@ -923,11 +831,7 @@ else:
 
                 tcols = ["run_id", "total_lines", "exception_lines", "exception_rate", "critical", "high"]
                 tcols = [c for c in tcols if c in s_hist.columns]
-                st.dataframe(
-                    s_hist[tcols].sort_values("run_id", ascending=False),
-                    use_container_width=True,
-                    height=220,
-                )
+                st.dataframe(s_hist[tcols].sort_values("run_id", ascending=False), use_container_width=True, height=220)
 
 # ============================================================
 # SLA Escalations panel (table)
