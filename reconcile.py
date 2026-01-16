@@ -20,6 +20,62 @@ def _to_dt(series) -> pd.Series:
         return pd.Series([pd.NaT] * len(series))
 
 
+def _canonicalize_keys(df: pd.DataFrame, *, df_name: str) -> pd.DataFrame:
+    """
+    Ensures df has canonical keys: order_id, sku (required by downstream groupby/merge).
+    Tries to rename common aliases from uploads/exports.
+    Raises a clear error if still missing.
+    """
+    if df is None:
+        df = pd.DataFrame()
+    df = df.copy()
+
+    # Common aliases across exports
+    alias_map = {
+        "order_id": ["order_id", "Order ID", "OrderID", "order", "Order", "Order Number", "order_number", "name", "Name"],
+        "sku": ["sku", "SKU", "Sku", "Variant SKU", "variant_sku", "line_item_sku", "Lineitem sku", "Line Item SKU"],
+        "quantity_ordered": ["quantity_ordered", "Quantity Ordered", "qty_ordered", "qty", "Qty", "Quantity"],
+        "quantity_shipped": ["quantity_shipped", "Quantity Shipped", "qty_shipped", "Shipped Quantity", "Quantity"],
+        "supplier_name": ["supplier_name", "Supplier", "Supplier Name"],
+        "supplier_order_id": ["supplier_order_id", "Supplier Order ID", "SupplierOrderID"],
+        "carrier": ["carrier", "Carrier"],
+        "tracking_number": ["tracking_number", "Tracking", "Tracking Number", "tracking", "tracking_no", "TrackingNo"],
+        "ship_datetime_utc": ["ship_datetime_utc", "Ship Date", "ship_date", "Ship Datetime", "shipped_at", "Shipped At"],
+        "customer_country": ["customer_country", "To Country", "Ship To Country", "country", "Country"],
+        "order_datetime_utc": ["order_datetime_utc", "Order Date", "order_date", "Created At", "created_at", "Order Created At"],
+        "promised_ship_days": ["promised_ship_days", "Promised Ship Days", "sla_days", "SLA Days"],
+    }
+
+    rename_map: dict[str, str] = {}
+
+    # Only rename when canonical missing
+    for canon, candidates in alias_map.items():
+        if canon in df.columns:
+            continue
+        for c in candidates:
+            if c in df.columns:
+                rename_map[c] = canon
+                break
+
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # Hard requirements for reconciliation logic
+    required = ["order_id", "sku"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"{df_name} missing required columns {missing}. "
+            f"Columns present: {list(df.columns)}"
+        )
+
+    # Normalize types to keep groupby/merge stable
+    df["order_id"] = df["order_id"].astype(str)
+    df["sku"] = df["sku"].astype(str)
+
+    return df
+
+
 # -----------------------------
 # Core reconciliation function
 # -----------------------------
@@ -38,6 +94,22 @@ def reconcile_all(
     """
 
     now = _now_utc()
+
+    # ✅ NEW: schema guard (prevents KeyError in groupby/merge)
+    orders = _canonicalize_keys(orders, df_name="orders")
+    shipments = _canonicalize_keys(shipments, df_name="shipments")
+    if tracking is None:
+        tracking = pd.DataFrame()
+
+    # Also ensure these exist to avoid later .get() surprises
+    if "quantity_ordered" not in orders.columns:
+        orders["quantity_ordered"] = 0
+    if "quantity_shipped" not in shipments.columns:
+        shipments["quantity_shipped"] = 0
+
+    # Normalize ship_datetime_utc if present
+    if "ship_datetime_utc" in shipments.columns:
+        shipments["ship_datetime_utc"] = _to_dt(shipments["ship_datetime_utc"])
 
     # -----------------------------
     # Aggregate shipments per order+SKU
@@ -138,8 +210,13 @@ def reconcile_all(
     if tracking is not None and not tracking.empty and "tracking_number" in df.columns:
         # tolerate different tracking schemas
         t = tracking.copy()
+
+        # try common rename(s)
         if "tracking_number" not in t.columns and "Tracking Number" in t.columns:
             t["tracking_number"] = t["Tracking Number"]
+        if "Delivered At" in t.columns and "delivery_date_utc" not in t.columns:
+            # tolerate string timestamps; we only check notna
+            pass
 
         delivered = []
         if "delivery_date_utc" in t.columns:
