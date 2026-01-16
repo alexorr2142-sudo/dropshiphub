@@ -236,3 +236,39 @@ def render_issue_tracker_panel(
     df["resolved"] = df["issue_id"].map(lambda k: bool((latest_map.get(str(k), {}) or {}).get("resolved", False)))
     df["notes"] = df["issue_id"].map(lambda k: str((latest_map.get(str(k), {}) or {}).get("notes", "")))
     return df
+
+
+def apply_issue_tracker(
+    *,
+    ws_root: Path,
+    followups_full: pd.DataFrame,
+) -> dict:
+    """
+    Convenience wrapper to keep app.py tiny.
+
+    Returns:
+      {
+        "issue_tracker_path": Path,
+        "followups_full": pd.DataFrame,
+        "followups_open": pd.DataFrame,
+        "followups_open_with_contact": pd.DataFrame,
+      }
+    """
+    issue_tracker_path = Path(ws_root) / "issue_tracker.json"
+
+    followups_open = derive_followups_open(
+        followups_full=followups_full,
+        issue_tracker_path=issue_tracker_path,
+    )
+
+    followups_open_with_contact = enrich_followups_with_contact_fields(
+        followups_df=followups_open,
+        issue_tracker_path=issue_tracker_path,
+    )
+
+    return {
+        "issue_tracker_path": issue_tracker_path,
+        "followups_full": followups_full,
+        "followups_open": followups_open,
+        "followups_open_with_contact": followups_open_with_contact,
+    }
