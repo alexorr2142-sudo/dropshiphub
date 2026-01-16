@@ -53,7 +53,8 @@ def make_daily_ops_pack_bytes(
         z.writestr(
             "README.txt",
             (
-                "Dropship Hub — Daily Ops Pack\n"
+                "ClearOps — Daily Ops Pack\n"
+                "\n"
                 "Files:\n"
                 " - exceptions.csv: SKU-level issues to action\n"
                 " - supplier_followups.csv: supplier messages to send (OPEN/unresolved)\n"
