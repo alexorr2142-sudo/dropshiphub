@@ -176,7 +176,7 @@ except Exception:
     render_exceptions_queue = None
 
 # ============================================================
-# Internal section helpers (new)
+# Internal section helpers
 # ============================================================
 from ui.app_helpers import mailto_fallback
 from ui.app_inputs import render_start_here, render_upload_and_templates, resolve_raw_inputs
@@ -395,7 +395,6 @@ render_exceptions_queue_section(
     render_exceptions_queue=render_exceptions_queue,
 )
 
-# Supplier scorecards + trend
 list_runs = None
 try:
     from core.workspaces import list_runs  # type: ignore
