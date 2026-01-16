@@ -24,7 +24,7 @@ def _zip_bytes(files: dict[str, bytes]) -> bytes:
 def render_template_downloads(
     *,
     key_prefix: str = "tmpl",
-    title: str = "Download templates",
+    title: str = "Download ClearOps templates",
     expanded: bool = False,
     show_preview: bool = False,
 ) -> None:
@@ -41,7 +41,7 @@ def render_template_downloads(
     with st.expander(title, expanded=expanded):
         st.caption(
             "Use these templates if your exports don’t match the expected column names. "
-            "You can upload your own CSVs too — these are just starting points."
+            "You can upload your own CSVs too — these are just starting points for ClearOps."
         )
 
         # ----------------------------
@@ -121,7 +121,7 @@ def render_template_downloads(
                 key=f"{key_prefix}_suppliers",
                 use_container_width=True,
             )
-            st.caption("Supplier Directory (CRM) for auto-filled emails.")
+            st.caption("Supplier Directory (CRM) for auto-filled follow-ups.")
 
         # ----------------------------
         # Download all as ZIP
@@ -132,11 +132,15 @@ def render_template_downloads(
                 "tracking_template.csv": _df_to_csv_bytes(tracking_template),
                 "suppliers_template.csv": _df_to_csv_bytes(suppliers_template),
                 "README.txt": (
-                    "Dropship Hub — Template Pack\n\n"
+                    "ClearOps — Template Pack\n\n"
+                    "Purpose:\n"
+                    "These CSV templates help you get started quickly in ClearOps if your\n"
+                    "exports don’t already match the expected column names.\n\n"
                     "Files:\n"
-                    " - shipments_template.csv: supplier shipment confirmations\n"
-                    " - tracking_template.csv: tracking rollup (optional)\n"
-                    " - suppliers_template.csv: supplier contact directory (CRM)\n"
+                    " - shipments_template.csv: supplier shipment confirmations (recommended)\n"
+                    " - tracking_template.csv: carrier tracking rollup (optional)\n"
+                    " - suppliers_template.csv: supplier contact directory (CRM)\n\n"
+                    "You can upload your own CSVs at any time — templates are optional.\n"
                 ).encode("utf-8"),
             }
         )
@@ -144,7 +148,7 @@ def render_template_downloads(
         st.download_button(
             "⬇️ Download all templates (ZIP)",
             data=zip_data,
-            file_name="dropshiphub_templates.zip",
+            file_name="clearops_templates.zip",
             mime="application/zip",
             key=f"{key_prefix}_zip_all",
             use_container_width=True,
