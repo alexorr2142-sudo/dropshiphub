@@ -1,19 +1,32 @@
 # core/scorecards.py
+from __future__ import annotations
+
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, Callable
 
 import pandas as pd
-import streamlit as st
 
 from core.styling import add_urgency_column
 from core.workspaces import list_runs
+
 
 def _contains_any(s: str, terms: list[str]) -> bool:
     s = (s or "").lower()
     return any(t in s for t in terms)
 
+
 def build_supplier_scorecard_from_run(line_status_df: pd.DataFrame, exceptions_df: pd.DataFrame) -> pd.DataFrame:
-    if line_status_df is None or line_status_df.empty:
+    """
+    Builds a per-supplier scorecard from:
+      - line_status_df (requires supplier_name)
+      - exceptions_df (optional; uses supplier_name + urgency + issue text)
+
+    Output columns (best effort):
+      supplier_name, total_lines, exception_lines, exception_rate, critical, high,
+      missing_tracking_flags, late_flags, carrier_exception_flags
+    """
+    if line_status_df is None or not isinstance(line_status_df, pd.DataFrame) or line_status_df.empty:
         return pd.DataFrame()
 
     df = line_status_df.copy()
@@ -28,10 +41,16 @@ def build_supplier_scorecard_from_run(line_status_df: pd.DataFrame, exceptions_d
     base = df.groupby("supplier_name").size().reset_index(name="total_lines")
 
     exc = None
-    if exceptions_df is not None and not exceptions_df.empty and "supplier_name" in exceptions_df.columns:
+    if (
+        exceptions_df is not None
+        and isinstance(exceptions_df, pd.DataFrame)
+        and not exceptions_df.empty
+        and "supplier_name" in exceptions_df.columns
+    ):
         exc = exceptions_df.copy()
         exc["supplier_name"] = exc["supplier_name"].fillna("").astype(str)
         exc = exc[exc["supplier_name"].str.strip() != ""].copy()
+
         if not exc.empty:
             if "Urgency" not in exc.columns:
                 exc = add_urgency_column(exc)
@@ -50,21 +69,23 @@ def build_supplier_scorecard_from_run(line_status_df: pd.DataFrame, exceptions_d
 
     out = (
         base.merge(exc_counts, on="supplier_name", how="left")
-            .merge(crit, on="supplier_name", how="left")
-            .merge(high, on="supplier_name", how="left")
+        .merge(crit, on="supplier_name", how="left")
+        .merge(high, on="supplier_name", how="left")
     )
+
     out["exception_lines"] = out["exception_lines"].fillna(0).astype(int)
     out["critical"] = out["critical"].fillna(0).astype(int)
     out["high"] = out["high"].fillna(0).astype(int)
-    out["exception_rate"] = (out["exception_lines"] / out["total_lines"]).round(4)
+    out["exception_rate"] = (out["exception_lines"] / out["total_lines"]).replace([pd.NA], 0).round(4)
 
     if exc is not None and not exc.empty:
-        def _flag_count(term_list):
+
+        def _flag_count(term_list: list[str]) -> pd.DataFrame:
             tmp = exc.copy()
             blob = (
-                tmp.get("issue_type", "").astype(str).fillna("") + " " +
-                tmp.get("explanation", "").astype(str).fillna("") + " " +
-                tmp.get("next_action", "").astype(str).fillna("")
+                tmp.get("issue_type", "").astype(str).fillna("") + " "
+                + tmp.get("explanation", "").astype(str).fillna("") + " "
+                + tmp.get("next_action", "").astype(str).fillna("")
             ).str.lower()
             tmp["_flag"] = blob.apply(lambda x: _contains_any(x, term_list))
             return tmp[tmp["_flag"]].groupby("supplier_name").size().reset_index(name="count")
@@ -77,7 +98,11 @@ def build_supplier_scorecard_from_run(line_status_df: pd.DataFrame, exceptions_d
         lt = _flag_count(late_terms).rename(columns={"count": "late_flags"})
         ct = _flag_count(carrier_terms).rename(columns={"count": "carrier_exception_flags"})
 
-        out = out.merge(mt, on="supplier_name", how="left").merge(lt, on="supplier_name", how="left").merge(ct, on="supplier_name", how="left")
+        out = (
+            out.merge(mt, on="supplier_name", how="left")
+            .merge(lt, on="supplier_name", how="left")
+            .merge(ct, on="supplier_name", how="left")
+        )
         for c in ["missing_tracking_flags", "late_flags", "carrier_exception_flags"]:
             out[c] = out.get(c, 0).fillna(0).astype(int)
     else:
@@ -88,22 +113,47 @@ def build_supplier_scorecard_from_run(line_status_df: pd.DataFrame, exceptions_d
     out = out.sort_values(["exception_rate", "critical", "high"], ascending=[False, False, False])
     return out
 
-def _parse_run_id_to_dt(run_id: str):
+
+def _parse_run_id_to_dt(run_id: str) -> Optional[datetime]:
     try:
         return datetime.strptime(run_id, "%Y%m%dT%H%M%SZ")
     except Exception:
         return None
 
-@st.cache_data(show_spinner=False)
-def load_recent_scorecard_history(ws_root_str: str, max_runs: int = 25) -> pd.DataFrame:
-    ws_root = Path(ws_root_str)
-    runs = list_runs(ws_root)[:max_runs]
 
-    all_rows = []
+def _maybe_cache_data(func: Callable):
+    """
+    Optional Streamlit caching. If Streamlit isn't available (tests/CLI),
+    this becomes a no-op decorator.
+    """
+    try:
+        import streamlit as st  # type: ignore
+
+        return st.cache_data(show_spinner=False)(func)
+    except Exception:
+        return func
+
+
+@_maybe_cache_data
+def load_recent_scorecard_history(ws_root_str: str, max_runs: int = 25) -> pd.DataFrame:
+    """
+    Backward-compatible signature: accepts ws_root_str.
+    """
+    return load_recent_scorecard_history_path(Path(ws_root_str), max_runs=max_runs)
+
+
+def load_recent_scorecard_history_path(ws_root: Path, max_runs: int = 25) -> pd.DataFrame:
+    """
+    Preferred signature: accepts ws_root Path.
+    Builds a long table across the last N runs with per-supplier metrics.
+    """
+    runs = list_runs(ws_root)[: int(max_runs)]
+    all_rows: list[pd.DataFrame] = []
+
     for r in runs:
         run_dir = Path(r["path"])
         run_id = r.get("run_id", run_dir.name)
-        run_dt = _parse_run_id_to_dt(run_id)
+        run_dt = _parse_run_id_to_dt(str(run_id))
 
         line_path = run_dir / "line_status.csv"
         exc_path = run_dir / "exceptions.csv"
@@ -125,7 +175,7 @@ def load_recent_scorecard_history(ws_root_str: str, max_runs: int = 25) -> pd.Da
             continue
 
         sc = sc.copy()
-        sc["run_id"] = run_id
+        sc["run_id"] = str(run_id)
         sc["run_dt"] = run_dt
         all_rows.append(sc)
 
