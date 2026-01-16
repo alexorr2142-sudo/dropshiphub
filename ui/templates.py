@@ -1,8 +1,11 @@
 # ui/templates.py
+from __future__ import annotations
+
 import pandas as pd
 import streamlit as st
 
-def render_template_downloads():
+
+def render_template_downloads(key_prefix: str = "tmpl") -> None:
     st.subheader("Download templates")
 
     shipments_template = pd.DataFrame(
@@ -44,6 +47,7 @@ def render_template_downloads():
             data=shipments_template.to_csv(index=False).encode("utf-8"),
             file_name="shipments_template.csv",
             mime="text/csv",
+            key=f"{key_prefix}_shipments",
         )
     with t2:
         st.download_button(
@@ -51,6 +55,7 @@ def render_template_downloads():
             data=tracking_template.to_csv(index=False).encode("utf-8"),
             file_name="tracking_template.csv",
             mime="text/csv",
+            key=f"{key_prefix}_tracking",
         )
     with t3:
         st.download_button(
@@ -58,4 +63,5 @@ def render_template_downloads():
             data=suppliers_template.to_csv(index=False).encode("utf-8"),
             file_name="suppliers_template.csv",
             mime="text/csv",
+            key=f"{key_prefix}_suppliers",
         )
