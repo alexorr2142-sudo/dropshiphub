@@ -54,7 +54,6 @@ def make_daily_ops_pack_bytes(
             "README.txt",
             (
                 "ClearOps — Daily Ops Pack\n"
-                "\n"
                 "Files:\n"
                 " - exceptions.csv: SKU-level issues to action\n"
                 " - supplier_followups.csv: supplier messages to send (OPEN/unresolved)\n"
