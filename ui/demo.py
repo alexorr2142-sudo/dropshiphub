@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from core.demo_schema import validate_demo_inputs
+from ui.demo_fork_ui import render_demo_fork_controls
 
 DEMO_KEYS = {
     "orders": "demo_raw_orders",
@@ -30,6 +31,11 @@ def _demo_mode_active() -> bool:
             st.session_state.get("app_demo_mode", st.session_state.get("sb_demo_mode", False)),
         )
     )
+
+
+def _infer_data_dir() -> Path:
+    # Same convention as app.py: BASE_DIR / "data"
+    return Path(__file__).resolve().parent.parent / "data"
 
 
 def _load_demo_files(data_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -109,8 +115,7 @@ def render_demo_editor(key_prefix: str = "demo") -> None:
     c0, _ = st.columns([1, 3])
     with c0:
         if st.button("Reset demo from CSV files", use_container_width=True, key=f"{key_prefix}_btn_reset"):
-            # infer project /data directory (same convention as app.py)
-            data_dir = Path(__file__).resolve().parent.parent / "data"
+            data_dir = _infer_data_dir()
             _reset_demo_tables(data_dir)
             ensure_demo_state(data_dir)
             st.success("Demo reset ✅")
@@ -149,7 +154,7 @@ def render_demo_editor(key_prefix: str = "demo") -> None:
                 key=f"{key_prefix}_tracking_editor",
             )
 
-    # Recompute schema report after edits (best-effort)
+    # Recompute schema report after edits
     try:
         report = validate_demo_inputs(
             st.session_state.get(DEMO_KEYS["orders"], pd.DataFrame()),
@@ -162,6 +167,18 @@ def render_demo_editor(key_prefix: str = "demo") -> None:
             "messages": report.messages,
         }
     except Exception:
+        pass
+
+    # NEW: Fork demo edits into a workspace snapshot (RAW CSVs)
+    try:
+        render_demo_fork_controls(
+            raw_orders=st.session_state.get(DEMO_KEYS["orders"], pd.DataFrame()),
+            raw_shipments=st.session_state.get(DEMO_KEYS["shipments"], pd.DataFrame()),
+            raw_tracking=st.session_state.get(DEMO_KEYS["tracking"], pd.DataFrame()),
+            key_prefix=f"{key_prefix}_fork",
+        )
+    except Exception:
+        # Never let optional UI break the main app
         pass
 
 
