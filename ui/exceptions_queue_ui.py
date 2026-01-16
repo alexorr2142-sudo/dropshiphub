@@ -1,104 +1,144 @@
-# ui/scorecards_ui.py
+# ui/exceptions_queue_ui.py
 from __future__ import annotations
 
-from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from core.scorecards import load_recent_scorecard_history
+from core.styling import style_exceptions_table
 
 
-def render_supplier_scorecards(
-    scorecard: pd.DataFrame,
+def render_exceptions_queue(
+    exceptions: pd.DataFrame,
     *,
-    ws_root: Path,
-    key_prefix: str = "scorecards",
-    title: str = "Supplier Scorecards (Performance + Trends)",
+    key_prefix: str = "exq",
+    title: str = "Exceptions Queue (Action this first)",
+    height: int = 420,
 ) -> None:
+    """
+    Renders Exceptions Queue exactly like app.py:
+      - 4 multiselect filters (issue type, country, supplier, urgency)
+      - filters exceptions accordingly
+      - sorts by Urgency, order_id
+      - shows preferred columns with style_exceptions_table
+      - downloads filtered exceptions as CSV
+    """
     st.subheader(title)
 
-    if scorecard is None or not isinstance(scorecard, pd.DataFrame) or scorecard.empty:
-        st.info("Scorecards require `supplier_name` in your normalized line status data.")
+    if exceptions is None or not isinstance(exceptions, pd.DataFrame) or exceptions.empty:
+        st.info("No exceptions found 🎉")
         return
 
-    sc1, sc2 = st.columns(2)
-    with sc1:
-        top_n = st.slider(
-            "Show top N suppliers",
-            min_value=5,
-            max_value=50,
-            value=15,
-            step=5,
-            key=f"{key_prefix}_top_n",
+    # -------------------------------
+    # Filters (match app.py)
+    # -------------------------------
+    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+
+    with fcol1:
+        issue_types = (
+            sorted(exceptions["issue_type"].dropna().unique().tolist())
+            if "issue_type" in exceptions.columns
+            else []
         )
-    with sc2:
-        min_lines = st.number_input(
-            "Min total lines",
-            min_value=1,
-            max_value=1000000,
-            value=1,
-            step=1,
-            key=f"{key_prefix}_min_lines",
+        issue_filter = st.multiselect(
+            "Issue types",
+            issue_types,
+            default=issue_types,
+            key=f"{key_prefix}_issue_types",
         )
 
-    view = scorecard[scorecard["total_lines"] >= int(min_lines)].head(int(top_n))
+    with fcol2:
+        countries = []
+        if "customer_country" in exceptions.columns:
+            countries = sorted(
+                [
+                    c
+                    for c in exceptions["customer_country"].dropna().unique().tolist()
+                    if str(c).strip() != ""
+                ]
+            )
+        country_filter = st.multiselect(
+            "Customer country",
+            countries,
+            default=countries,
+            key=f"{key_prefix}_countries",
+        )
 
-    show_cols = [
+    with fcol3:
+        suppliers = []
+        if "supplier_name" in exceptions.columns:
+            suppliers = sorted(
+                [
+                    s
+                    for s in exceptions["supplier_name"].dropna().unique().tolist()
+                    if str(s).strip() != ""
+                ]
+            )
+        supplier_filter = st.multiselect(
+            "Supplier",
+            suppliers,
+            default=suppliers,
+            key=f"{key_prefix}_suppliers",
+        )
+
+    with fcol4:
+        urgencies = ["Critical", "High", "Medium", "Low"]
+        urgency_filter = st.multiselect(
+            "Urgency",
+            urgencies,
+            default=urgencies,
+            key=f"{key_prefix}_urgency",
+        )
+
+    # -------------------------------
+    # Apply filters (match app.py)
+    # -------------------------------
+    filtered = exceptions.copy()
+
+    if issue_filter and "issue_type" in filtered.columns:
+        filtered = filtered[filtered["issue_type"].isin(issue_filter)]
+
+    if country_filter and "customer_country" in filtered.columns:
+        filtered = filtered[filtered["customer_country"].isin(country_filter)]
+
+    if supplier_filter and "supplier_name" in filtered.columns:
+        filtered = filtered[filtered["supplier_name"].isin(supplier_filter)]
+
+    if urgency_filter and "Urgency" in filtered.columns:
+        filtered = filtered[filtered["Urgency"].isin(urgency_filter)]
+
+    # -------------------------------
+    # Sort + choose columns (match app.py)
+    # -------------------------------
+    sort_cols = [c for c in ["Urgency", "order_id"] if c in filtered.columns]
+    if sort_cols:
+        filtered = filtered.sort_values(sort_cols, ascending=True)
+
+    preferred_cols = [
+        "Urgency",
+        "order_id",
+        "sku",
+        "issue_type",
+        "customer_country",
         "supplier_name",
-        "total_lines",
-        "exception_lines",
-        "exception_rate",
-        "critical",
-        "high",
-        "missing_tracking_flags",
-        "late_flags",
-        "carrier_exception_flags",
+        "quantity_ordered",
+        "quantity_shipped",
+        "line_status",
+        "explanation",
+        "next_action",
+        "customer_risk",
     ]
-    show_cols = [c for c in show_cols if c in view.columns]
+    show_cols = [c for c in preferred_cols if c in filtered.columns]
 
-    st.dataframe(view[show_cols] if show_cols else view, use_container_width=True, height=320)
-
-    st.download_button(
-        "Download Supplier Scorecards CSV",
-        data=scorecard.to_csv(index=False).encode("utf-8"),
-        file_name="supplier_scorecards.csv",
-        mime="text/csv",
-        key=f"{key_prefix}_dl_scorecards_csv",
+    st.dataframe(
+        style_exceptions_table(filtered[show_cols] if show_cols else filtered),
+        use_container_width=True,
+        height=height,
     )
 
-    with st.expander("Trend over time (from saved runs)", expanded=True):
-        max_runs = st.slider(
-            "Use last N saved runs",
-            5,
-            50,
-            25,
-            5,
-            key=f"{key_prefix}_trend_max_runs",
-        )
-
-        hist = load_recent_scorecard_history(str(ws_root), max_runs=int(max_runs))
-
-        if hist is None or hist.empty:
-            st.caption("No historical scorecards found yet (save a run first).")
-            return
-
-        supplier_options = sorted(hist["supplier_name"].dropna().unique().tolist())
-        chosen_supplier = st.selectbox(
-            "Supplier",
-            supplier_options,
-            key=f"{key_prefix}_trend_supplier",
-        )
-
-        s_hist = hist[hist["supplier_name"] == chosen_supplier].copy().sort_values("run_dt")
-        chart_df = s_hist[["run_dt", "exception_rate"]].dropna()
-
-        if not chart_df.empty:
-            st.line_chart(chart_df.set_index("run_dt"))
-
-        tcols = ["run_id", "total_lines", "exception_lines", "exception_rate", "critical", "high"]
-        tcols = [c for c in tcols if c in s_hist.columns]
-        st.dataframe(
-            s_hist[tcols].sort_values("run_id", ascending=False),
-            use_container_width=True,
-            height=220,
-        )
+    st.download_button(
+        "Download Exceptions CSV",
+        data=filtered.to_csv(index=False).encode("utf-8"),
+        file_name="exceptions_queue.csv",
+        mime="text/csv",
+        key=f"{key_prefix}_dl_exceptions_csv",
+    )
