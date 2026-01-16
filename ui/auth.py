@@ -5,13 +5,6 @@ import os
 import streamlit as st
 
 
-# -------------------------------
-# Internal session flags
-# -------------------------------
-_ACCESS_CODE_OK_FLAG = "_clearops_access_code_ok"
-_ACCESS_EMAIL_OK_FLAG = "_clearops_access_email_ok"
-
-
 def _parse_allowed_emails_from_env() -> list[str]:
     raw = os.getenv("DSH_ALLOWED_EMAILS", "").strip()
     if not raw:
@@ -33,70 +26,75 @@ def get_allowed_emails() -> list[str]:
     return sorted(set(allowed + allowed_env))
 
 
-def _get_first_session_value(keys: list[str]) -> str:
+def _access_code_value(env_var: str = "DSH_ACCESS_CODE", default_code: str = "early2026") -> str:
+    return os.getenv(env_var, default_code) or ""
+
+
+def _already_authed_in_session(
+    *,
+    env_var: str = "DSH_ACCESS_CODE",
+    default_code: str = "early2026",
+) -> bool:
     """
-    Returns the first non-empty string found in st.session_state for any of the given keys.
+    If app.py already ran the gates, those widget values will be in session_state.
+    We treat that as canonical and do NOT render duplicate gates.
+
+    We check multiple historical keys for backward compatibility.
     """
-    for k in keys:
-        try:
-            v = st.session_state.get(k, "")
-        except Exception:
-            v = ""
+    access_code = _access_code_value(env_var=env_var, default_code=default_code)
+
+    # Early access code keys we've used historically
+    code_keys = ["auth_early_access_code", "auth_access_code", "early_access_code"]
+    code_val = ""
+    for k in code_keys:
+        v = st.session_state.get(k)
         if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
+            code_val = v.strip()
+            break
 
+    if code_val != access_code:
+        return False
 
-def _mark_access_code_ok() -> None:
-    st.session_state[_ACCESS_CODE_OK_FLAG] = True
+    # Email keys we've used historically
+    email_keys = ["auth_email", "auth_work_email"]
+    email_val = ""
+    for k in email_keys:
+        v = st.session_state.get(k)
+        if isinstance(v, str) and v.strip():
+            email_val = v.strip().lower()
+            break
 
+    allowed = get_allowed_emails()
 
-def _mark_access_email_ok() -> None:
-    st.session_state[_ACCESS_EMAIL_OK_FLAG] = True
+    # If allowlist is disabled, code match is enough.
+    if not allowed:
+        return True
 
-
-def _access_code_already_ok() -> bool:
-    return bool(st.session_state.get(_ACCESS_CODE_OK_FLAG, False))
-
-
-def _access_email_already_ok() -> bool:
-    return bool(st.session_state.get(_ACCESS_EMAIL_OK_FLAG, False))
+    return bool(email_val) and (email_val in allowed)
 
 
 # -------------------------------------------------
-# Backward-compatible wrapper (so app.py imports work)
+# Backward-compatible wrapper (so older imports work)
 # -------------------------------------------------
 def early_access_gate(access_code: str):
     """
-    Compatibility wrapper for older app.py imports:
+    Compatibility wrapper for older code that imports:
       from ui.auth import early_access_gate
 
-    Bugfix:
-      - Do not render a second gate if the user already passed elsewhere.
-      - Recognize codes entered using app.py's keys to avoid duplicate prompts.
+    IMPORTANT:
+      - uses the SAME widget key as the main app gate to avoid duplicates
+      - is idempotent (won't re-render if already authed)
     """
-    if _access_code_already_ok():
-        return
-
-    # If app.py already collected a code, honor it.
-    existing = _get_first_session_value(
-        [
-            "auth_early_access_code",  # app.py (new)
-            "auth_access_code",        # this module (old/default)
-            "early_access_code",       # legacy
-        ]
-    )
-    if existing and existing == (access_code or ""):
-        _mark_access_code_ok()
+    access_code = access_code or ""
+    # If app.py already validated, do nothing.
+    if st.session_state.get("auth_early_access_code", "").strip() == access_code:
         return
 
     st.subheader("Early access")
-    code = st.text_input("Enter early access code", type="password", key="auth_access_code")
-    if code != (access_code or ""):
+    code = st.text_input("Enter early access code", type="password", key="auth_early_access_code")
+    if code != access_code:
         st.info("This app is currently in early access. Enter your code to continue.")
         st.stop()
-
-    _mark_access_code_ok()
 
 
 def require_early_access_code_gate(
@@ -104,37 +102,22 @@ def require_early_access_code_gate(
     public_review_mode: bool = False,
     env_var: str = "DSH_ACCESS_CODE",
     default_code: str = "early2026",
-    key: str = "auth_access_code",
+    key: str = "auth_early_access_code",
 ) -> None:
     """
     Early access gate:
       - bypassed when public_review_mode=True
       - compares against env var DSH_ACCESS_CODE (or default_code)
-
-    Bugfix:
-      - Idempotent: once passed, it won't render again on the same session.
-      - Recognizes code entered under app.py key to avoid duplicate prompts.
+      - idempotent if the user already passed gates via app.py
     """
     if public_review_mode:
         return
 
-    if _access_code_already_ok():
+    # If already authed, do nothing.
+    if _already_authed_in_session(env_var=env_var, default_code=default_code):
         return
 
-    access_code = os.getenv(env_var, default_code)
-
-    # If another part of the app already collected a code, honor it.
-    existing = _get_first_session_value(
-        [
-            "auth_early_access_code",  # app.py (new)
-            key,                       # caller-provided key (default: auth_access_code)
-            "auth_access_code",        # this module legacy/default
-            "early_access_code",       # legacy
-        ]
-    )
-    if existing and existing == access_code:
-        _mark_access_code_ok()
-        return
+    access_code = _access_code_value(env_var=env_var, default_code=default_code)
 
     st.subheader("Early access")
     code = st.text_input("Enter early access code", type="password", key=key)
@@ -142,65 +125,41 @@ def require_early_access_code_gate(
         st.info("This app is currently in early access. Enter your code to continue.")
         st.stop()
 
-    _mark_access_code_ok()
-
 
 def require_email_access_gate(
     *,
     public_review_mode: bool = False,
-    key: str = "auth_work_email",
+    key: str = "auth_email",
 ) -> None:
     """
     Email allowlist gate:
       - bypassed when public_review_mode=True
       - allowlist from st.secrets['ALLOWED_EMAILS'] + env DSH_ALLOWED_EMAILS
       - if allowlist is empty: verification disabled (accept all emails)
-
-    Bugfix:
-      - Idempotent: once passed, it won't render again on the same session.
-      - Recognizes email entered under app.py key to avoid duplicate prompts.
+      - idempotent if the user already passed gates via app.py
     """
     if public_review_mode:
         return
 
-    if _access_email_already_ok():
-        return
-
-    allowed = get_allowed_emails()
-
-    # If allowlist is empty, email verification is disabled.
-    # Mark as OK and do not render (prevents duplicate "Access" blocks).
-    if not allowed:
-        _mark_access_email_ok()
-        return
-
-    # If another part of the app already collected email, honor it.
-    existing_email = _get_first_session_value(
-        [
-            "auth_email",        # app.py
-            key,                 # caller-provided (default: auth_work_email)
-            "auth_work_email",   # this module default
-            "auth_email",        # legacy variants
-        ]
-    ).lower()
-
-    if existing_email and existing_email in allowed:
-        _mark_access_email_ok()
+    # If already authed, do nothing.
+    if _already_authed_in_session():
         return
 
     st.subheader("Access")
     email = st.text_input("Work email", key=key).strip().lower()
+    allowed = get_allowed_emails()
 
-    if not email:
-        st.info("Enter your work email to continue.")
-        st.stop()
-    if email not in allowed:
-        st.error("This email is not authorized for early access.")
-        st.caption("Ask the admin to add your email to the allowlist.")
-        st.stop()
-
-    st.success("Email verified ✅")
-    _mark_access_email_ok()
+    if allowed:
+        if not email:
+            st.info("Enter your work email to continue.")
+            st.stop()
+        if email not in allowed:
+            st.error("This email is not authorized for early access.")
+            st.caption("Ask the admin to add your email to the allowlist.")
+            st.stop()
+        st.success("Email verified ✅")
+    else:
+        st.caption("Email verification is currently disabled (accepting all emails).")
 
 
 def require_access(
@@ -212,9 +171,13 @@ def require_access(
       1) early access code
       2) email allowlist
 
-    Bugfix:
-      - Safe to call multiple times from multiple pages/modules.
-      - Won't duplicate UI once gates are satisfied.
+    Now idempotent: if app.py already authenticated, this does nothing.
     """
+    if public_review_mode:
+        return
+
+    if _already_authed_in_session():
+        return
+
     require_early_access_code_gate(public_review_mode=public_review_mode)
     require_email_access_gate(public_review_mode=public_review_mode)
