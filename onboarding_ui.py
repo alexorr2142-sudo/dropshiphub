@@ -1,51 +1,55 @@
-# ui/onboarding_ui.py
+# onboarding_ui.py (root-level)
 from __future__ import annotations
 
-import streamlit as st
+"""
+Backward-compatible onboarding wrapper.
+
+Why this exists:
+- The repo has BOTH:
+    - onboarding_ui.py   (root)
+    - ui/onboarding_ui.py (package)
+
+If any legacy code imports the root module (import onboarding_ui),
+we must ensure it does NOT render legacy "Dropship Hub" headers or gates.
+
+This file:
+- contains ZERO Streamlit UI at import-time
+- delegates to ui.onboarding_ui when available
+- preserves function names to avoid breaking existing workflows
+"""
+
+from typing import Callable, Optional
 
 
-def render_onboarding_checklist(
-    *,
-    title: str = "ClearOps onboarding checklist (14 steps)",
-    expanded: bool = True,
-) -> None:
-    with st.expander(title, expanded=expanded):
-        st.markdown(
-            """
-### What is ClearOps?
+def _safe_import_render() -> Optional[Callable[..., None]]:
+    try:
+        # Preferred: new module in /ui
+        from ui.onboarding_ui import render_onboarding_checklist  # type: ignore
 
-**ClearOps** gives you operational clarity by turning messy order, shipment,
-and tracking data into **clear exceptions, follow-ups, and actions**.
+        return render_onboarding_checklist
+    except Exception:
+        return None
 
-It helps teams:
-- See what’s broken (and why)
-- Prioritize Critical and High-risk issues
-- Track supplier follow-ups
-- Communicate proactively with customers
-- Build trend history over time
 
-You can explore everything instantly using **ClearOps Demo**, or upload
-your own CSVs to run against real data.
-            """.strip()
-        )
+def render_onboarding_checklist(*, title: str = "ClearOps onboarding checklist (14 steps)", expanded: bool = True) -> None:
+    """
+    Compatibility entrypoint:
+      - older code may call onboarding_ui.render_onboarding_checklist(...)
+      - we route it to ui.onboarding_ui.render_onboarding_checklist when present
 
-        st.divider()
+    IMPORTANT:
+      - This function intentionally does not render any app title/caption/auth.
+      - Branding + access gates must live in app.py only.
+    """
+    fn = _safe_import_render()
+    if fn is None:
+        # Fail safely: don't crash the app if optional UI is missing
+        try:
+            import streamlit as st  # local import to avoid side effects at import-time
 
-        st.markdown(
-            """
-1. Enter **Early Access Code**  
-2. Verify your **work email** (allowlist gate)  
-3. Set **Tenant**: `account_id`, `store_id`, `platform_hint`  
-4. Set **Defaults**: currency + promised ship days (SLA)  
-5. (Optional) Turn on **ClearOps Demo (Sticky)** to explore instantly  
-6. (Demo) Use **Edit demo data** to simulate real scenarios  
-7. Upload **Orders CSV** (required if not using demo)  
-8. Upload **Shipments CSV** (required if not using demo)  
-9. Upload **Tracking CSV** (optional but recommended)  
-10. Download **Templates** if you need the correct format  
-11. Upload **suppliers.csv** to auto-fill supplier follow-ups  
-12. Review **Ops Triage** (start with Critical + High)  
-13. Work the **Exceptions Queue** (filter by supplier, country, urgency)  
-14. Use **Ops Outreach (Comms)**, then **Save Run** to build trends and history
-            """.strip()
-        )
+            st.warning("Onboarding UI module not found (ui/onboarding_ui.py).")
+        except Exception:
+            pass
+        return
+
+    fn(title=title, expanded=expanded)
