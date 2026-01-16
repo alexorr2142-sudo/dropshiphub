@@ -108,10 +108,36 @@ def _ensure_issue_meta(rec: Dict[str, Any]) -> Dict[str, Any]:
 
     rec.setdefault("last_action_at", "")
 
+    # ---- NEW: ensure context fields exist (for timeline + filtering)
+    for k in ["supplier_name", "supplier_email", "order_id", "order_ids"]:
+        v = rec.get(k, "")
+        if v is None:
+            v = ""
+        rec[k] = str(v)
+
     if rec.get("status") == "Resolved":
         rec["resolved"] = True
         if not rec.get("resolved_at"):
             rec["resolved_at"] = rec.get("updated_at", "") or _utc_now_iso()
+
+    return rec
+
+
+def _merge_context(rec: Dict[str, Any], context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Best-effort context merge.
+    Only fills blanks; does NOT overwrite existing non-empty values.
+    """
+    if not context or not isinstance(context, dict):
+        return rec
+
+    for k in ["supplier_name", "supplier_email", "order_id", "order_ids"]:
+        new_v = str(context.get(k, "") or "").strip()
+        if not new_v:
+            continue
+        old_v = str(rec.get(k, "") or "").strip()
+        if not old_v:
+            rec[k] = new_v
 
     return rec
 
@@ -151,6 +177,11 @@ class IssueTrackerStore:
                         "owner": rec.get("owner", None),
                         "status": rec.get("status", None),
                         "next_action_at": rec.get("next_action_at", None),
+                        # NEW: include context in migration compare
+                        "supplier_name": rec.get("supplier_name", None),
+                        "supplier_email": rec.get("supplier_email", None),
+                        "order_id": rec.get("order_id", None),
+                        "order_ids": rec.get("order_ids", None),
                     },
                     sort_keys=True,
                     default=str,
@@ -165,9 +196,13 @@ class IssueTrackerStore:
                         "owner": rec.get("owner", None),
                         "status": rec.get("status", None),
                         "next_action_at": rec.get("next_action_at", None),
+                        "supplier_name": rec.get("supplier_name", None),
+                        "supplier_email": rec.get("supplier_email", None),
+                        "order_id": rec.get("order_id", None),
+                        "order_ids": rec.get("order_ids", None),
                     },
                     sort_keys=True,
-                   default=str,
+                    default=str,
                 )
                 if before != after:
                     data[k] = rec
@@ -204,6 +239,9 @@ class IssueTrackerStore:
           - supports calling as _log_event(event_type, summary, issue_id=..., data=...)
           - supports calling as _log_event(event_type="...", summary="...", issue_id="...")
         Never raises.
+
+        NEW:
+          - includes supplier_name + order_id when present on the issue record
         """
         # Allow positional usage: (event_type, summary)
         try:
@@ -218,12 +256,27 @@ class IssueTrackerStore:
         tl = self._timeline()
         if tl is None:
             return
+
+        # NEW: pull context off the stored issue record (best effort)
+        supplier_name = ""
+        order_id = ""
+        try:
+            rec = self.get_issue(issue_id) if issue_id else {}
+            if isinstance(rec, dict):
+                supplier_name = str(rec.get("supplier_name", "") or "")
+                order_id = str(rec.get("order_id", "") or "")
+        except Exception:
+            supplier_name = ""
+            order_id = ""
+
         try:
             tl.log(
                 scope="issue",
                 event_type=str(event_type or ""),
                 summary=str(summary or ""),
                 issue_id=str(issue_id or ""),
+                supplier_name=supplier_name,
+                order_id=order_id,
                 actor=str(actor or "user"),
                 data=data or {},
             )
@@ -255,7 +308,13 @@ class IssueTrackerStore:
     # ----------------------------
     # Core mutations (existing)
     # ----------------------------
-    def upsert(self, issue_id: str, resolved: Optional[bool] = None, notes: Optional[str] = None) -> None:
+    def upsert(
+        self,
+        issue_id: str,
+        resolved: Optional[bool] = None,
+        notes: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         issue_id = str(issue_id or "").strip()
         if not issue_id:
             return
@@ -269,6 +328,9 @@ class IssueTrackerStore:
 
         if is_new:
             rec["created_at"] = now
+
+        # NEW: merge context fields (fills blanks only)
+        rec = _merge_context(rec, context)
 
         prev_resolved = bool(rec.get("resolved", False))
         prev_notes = str(rec.get("notes", "") or "")
@@ -322,11 +384,11 @@ class IssueTrackerStore:
                 data={"prev": prev_notes, "new": str(notes)},
             )
 
-    def set_resolved(self, issue_id: str, resolved: bool) -> None:
-        self.upsert(issue_id=issue_id, resolved=resolved)
+    def set_resolved(self, issue_id: str, resolved: bool, context: Optional[Dict[str, Any]] = None) -> None:
+        self.upsert(issue_id=issue_id, resolved=resolved, context=context)
 
-    def set_notes(self, issue_id: str, notes: str) -> None:
-        self.upsert(issue_id=issue_id, notes=notes)
+    def set_notes(self, issue_id: str, notes: str, context: Optional[Dict[str, Any]] = None) -> None:
+        self.upsert(issue_id=issue_id, notes=notes, context=context)
 
     # ----------------------------
     # Ownership / Status / Next action
@@ -343,7 +405,7 @@ class IssueTrackerStore:
         _ensure_issue_meta(rec)
         return rec
 
-    def set_owner(self, issue_id: str, owner: str) -> None:
+    def set_owner(self, issue_id: str, owner: str, context: Optional[Dict[str, Any]] = None) -> None:
         issue_id = str(issue_id or "").strip()
         if not issue_id:
             return
@@ -360,6 +422,9 @@ class IssueTrackerStore:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
+
+        # NEW: merge context (fills blanks only)
+        rec = _merge_context(rec, context)
 
         _ensure_contact(rec)
         _ensure_issue_meta(rec)
@@ -379,7 +444,7 @@ class IssueTrackerStore:
                 data={"prev": prev_owner, "new": rec["owner"]},
             )
 
-    def set_issue_status(self, issue_id: str, status: str) -> None:
+    def set_issue_status(self, issue_id: str, status: str, context: Optional[Dict[str, Any]] = None) -> None:
         issue_id = str(issue_id or "").strip()
         if not issue_id:
             return
@@ -401,6 +466,9 @@ class IssueTrackerStore:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
+
+        # NEW: merge context (fills blanks only)
+        rec = _merge_context(rec, context)
 
         _ensure_contact(rec)
         _ensure_issue_meta(rec)
@@ -440,7 +508,7 @@ class IssueTrackerStore:
                 data={"prev": prev_resolved, "new": bool(rec.get("resolved", False))},
             )
 
-    def set_next_action_at(self, issue_id: str, next_action_at: str) -> None:
+    def set_next_action_at(self, issue_id: str, next_action_at: str, context: Optional[Dict[str, Any]] = None) -> None:
         issue_id = str(issue_id or "").strip()
         if not issue_id:
             return
@@ -457,6 +525,9 @@ class IssueTrackerStore:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
+
+        # NEW: merge context (fills blanks only)
+        rec = _merge_context(rec, context)
 
         _ensure_contact(rec)
         _ensure_issue_meta(rec)
@@ -500,6 +571,7 @@ class IssueTrackerStore:
         channel: str = "email",
         note: str = "",
         new_status: str = "Contacted",
+        context: Optional[Dict[str, Any]] = None,
     ) -> None:
         issue_id = str(issue_id or "").strip()
         if not issue_id:
@@ -519,6 +591,9 @@ class IssueTrackerStore:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
+
+        # NEW: merge context (fills blanks only)
+        rec = _merge_context(rec, context)
 
         _ensure_contact(rec)
         _ensure_issue_meta(rec)
@@ -562,7 +637,13 @@ class IssueTrackerStore:
             },
         )
 
-    def increment_followup(self, issue_id: str, channel: str = "email", note: str = "") -> None:
+    def increment_followup(
+        self,
+        issue_id: str,
+        channel: str = "email",
+        note: str = "",
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         issue_id = str(issue_id or "").strip()
         if not issue_id:
             return
@@ -578,6 +659,9 @@ class IssueTrackerStore:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
+
+        # NEW: merge context (fills blanks only)
+        rec = _merge_context(rec, context)
 
         _ensure_contact(rec)
         _ensure_issue_meta(rec)
@@ -624,7 +708,12 @@ class IssueTrackerStore:
             },
         )
 
-    def set_contact_status(self, issue_id: str, status: str) -> None:
+    def set_contact_status(
+        self,
+        issue_id: str,
+        status: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         issue_id = str(issue_id or "").strip()
         if not issue_id:
             return
@@ -642,6 +731,9 @@ class IssueTrackerStore:
             rec["created_at"] = now
         rec["updated_at"] = now
         rec["last_action_at"] = now
+
+        # NEW: merge context (fills blanks only)
+        rec = _merge_context(rec, context)
 
         _ensure_contact(rec)
         _ensure_issue_meta(rec)
