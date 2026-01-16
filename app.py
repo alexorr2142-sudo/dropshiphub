@@ -11,8 +11,8 @@ import streamlit as st
 
 # ============================================================
 # 🔓 PUBLIC REVIEW MODE (TEMP)
-# True  => bypass passcode + email allowlist gates
-# False => gates enforced as normal
+# True  => bypass email allowlist gate
+# False => email allowlist gate enforced (NO password gate)
 # ============================================================
 PUBLIC_REVIEW_MODE = False
 
@@ -81,15 +81,11 @@ except Exception:
 # ============================================================
 # UI modules
 # ============================================================
-# Auth (optional while you refactor)
-require_access = None
-require_early_access_code_gate = None
+# ✅ Auth (EMAIL allowlist only for now; NO password gate)
 require_email_access_gate = None
 try:
-    from ui.auth import require_access, require_early_access_code_gate, require_email_access_gate  # type: ignore
+    from ui.auth import require_email_access_gate  # type: ignore
 except Exception:
-    require_access = None
-    require_early_access_code_gate = None
     require_email_access_gate = None
 
 # Sidebar context (exists in your repo now)
@@ -225,19 +221,14 @@ def _mailto_fallback(to: str, subject: str, body: str) -> str:
 
 
 # ============================================================
-# Page setup + Access gates
+# Page setup + Access gates (NO password gate)
 # ============================================================
 st.set_page_config(page_title="Dropship Hub", layout="wide")
 
-# Use require_access if present; otherwise fallback to your existing gates if present
-if callable(require_access):
-    require_access(public_review_mode=PUBLIC_REVIEW_MODE)
-else:
-    # Soft fallback: attempt older-style gates if available
-    if callable(require_early_access_code_gate):
-        require_early_access_code_gate(public_review_mode=PUBLIC_REVIEW_MODE)
-    if callable(require_email_access_gate):
-        require_email_access_gate(public_review_mode=PUBLIC_REVIEW_MODE)
+# ✅ TEMP: password gate removed
+# Email allowlist gate remains (unless PUBLIC_REVIEW_MODE=True)
+if callable(require_email_access_gate):
+    require_email_access_gate(public_review_mode=PUBLIC_REVIEW_MODE)
 
 
 # ============================================================
@@ -265,11 +256,22 @@ else:
         st.header("Tenant")
         account_id = st.text_input("account_id", value="demo_account", key="tenant_account_id")
         store_id = st.text_input("store_id", value="demo_store", key="tenant_store_id")
-        platform_hint = st.selectbox("platform hint", ["shopify", "amazon", "etsy", "other"], index=0, key="tenant_platform_hint")
+        platform_hint = st.selectbox(
+            "platform hint",
+            ["shopify", "amazon", "etsy", "other"],
+            index=0,
+            key="tenant_platform_hint",
+        )
 
         st.header("Defaults")
         default_currency = st.text_input("Default currency", value="USD", key="defaults_currency")
-        default_promised_ship_days = st.number_input("Default promised ship days (SLA)", min_value=1, max_value=30, value=3, key="defaults_sla_days")
+        default_promised_ship_days = st.number_input(
+            "Default promised ship days (SLA)",
+            min_value=1,
+            max_value=30,
+            value=3,
+            key="defaults_sla_days",
+        )
 
         demo_mode = st.toggle("Use demo data (sticky)", key="demo_mode")
 
@@ -357,7 +359,16 @@ else:
         f_shipments = st.file_uploader("Shipments CSV (supplier export)", type=["csv"], key="uploader_shipments")
     with c3:
         f_tracking = st.file_uploader("Tracking CSV (optional)", type=["csv"], key="uploader_tracking")
-    uploads = type("U", (), {"f_orders": f_orders, "f_shipments": f_shipments, "f_tracking": f_tracking, "has_uploads": (f_orders is not None and f_shipments is not None)})
+    uploads = type(
+        "U",
+        (),
+        {
+            "f_orders": f_orders,
+            "f_shipments": f_shipments,
+            "f_tracking": f_tracking,
+            "has_uploads": (f_orders is not None and f_shipments is not None),
+        },
+    )
 
 
 # ============================================================
@@ -497,7 +508,7 @@ if build_customer_impact_view is not None:
 
 
 # ============================================================
-# Daily Ops Pack ZIP (now includes customer impact if available)
+# Daily Ops Pack ZIP
 # ============================================================
 pack_date = datetime.now().strftime("%Y%m%d")
 pack_name = f"daily_ops_pack_{pack_date}.zip"
