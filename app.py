@@ -27,7 +27,7 @@ except Exception as e:
 # ============================================================
 from core.ops_pack import make_daily_ops_pack_bytes
 from core.scorecards import build_supplier_scorecard_from_run, load_recent_scorecard_history
-from core.styling import add_urgency_column, style_exceptions_table, copy_button
+from core.styling import add_urgency_column, style_exceptions_table
 from core.suppliers import (
     enrich_followups_with_suppliers,
     add_missing_supplier_contact_exceptions,
@@ -125,16 +125,19 @@ except Exception:
 derive_followups_open = None
 enrich_followups_with_contact_fields = None
 render_issue_tracker_maintenance = None
+render_issue_ownership_panel = None
 try:
     from ui.issue_tracker_ui import (  # type: ignore
         derive_followups_open,
         enrich_followups_with_contact_fields,
         render_issue_tracker_maintenance,
+        render_issue_ownership_panel,
     )
 except Exception:
     derive_followups_open = None
     enrich_followups_with_contact_fields = None
     render_issue_tracker_maintenance = None
+    render_issue_ownership_panel = None
 
 render_sla_escalations = None
 try:
@@ -171,6 +174,20 @@ try:
     from ui.supplier_accountability_ui import render_supplier_accountability  # type: ignore
 except Exception:
     render_supplier_accountability = None
+
+# NEW: use the real supplier followups tab (you updated this file already)
+render_supplier_followups_tab = None
+try:
+    from ui.supplier_followups_ui import render_supplier_followups_tab  # type: ignore
+except Exception:
+    render_supplier_followups_tab = None
+
+# NEW: dashboard timeline
+render_timeline_panel = None
+try:
+    from ui.timeline_ui import render_timeline_panel  # type: ignore
+except Exception:
+    render_timeline_panel = None
 
 # ============================================================
 # Helpers
@@ -276,6 +293,8 @@ diag = {
     "render_onboarding_checklist": render_onboarding_checklist is not None,
     "render_template_downloads": render_template_downloads is not None,
     "render_ops_triage": render_ops_triage is not None,
+    "render_supplier_followups_tab": render_supplier_followups_tab is not None,
+    "render_timeline_panel": render_timeline_panel is not None,
 }
 if callable(render_diagnostics):
     render_diagnostics(
@@ -330,7 +349,7 @@ else:
         )
     with c3:
         f_tracking = st.file_uploader(
-            "Tracking CSV\n(optional)",  # ✅ wrap to keep boxes aligned in split-screen
+            "Tracking CSV\n(optional)",
             type=["csv"],
             key="uploader_tracking",
         )
@@ -602,6 +621,18 @@ if build_daily_action_list is not None and render_daily_action_list is not None:
     except Exception:
         pass
 
+# NEW: recent activity timeline
+if callable(render_timeline_panel):
+    try:
+        render_timeline_panel(
+            timeline_path=(ws_root / "timeline.jsonl"),
+            title="Recent activity (Timeline)",
+            limit=50,
+            key_prefix="dash_timeline",
+        )
+    except Exception:
+        pass
+
 if render_kpi_trends is not None:
     try:
         render_kpi_trends(workspaces_dir=WORKSPACES_DIR, account_id=account_id, store_id=store_id)
@@ -621,6 +652,18 @@ else:
     else:
         st.dataframe(style_exceptions_table(exceptions.head(10)), use_container_width=True, height=320)
 
+# NEW: Ownership panel in triage (optional but high impact)
+if callable(render_issue_ownership_panel):
+    try:
+        render_issue_ownership_panel(
+            followups_df=followups_open if isinstance(followups_open, pd.DataFrame) else pd.DataFrame(),
+            issue_tracker_path=ISSUE_TRACKER_PATH,
+            title="Ownership & Follow-through",
+            key_prefix="triage_owner",
+        )
+    except Exception:
+        pass
+
 # ============================================================
 # Ops Outreach (Comms)
 # ============================================================
@@ -629,87 +672,23 @@ st.subheader("Ops Outreach (Comms)")
 tab1, tab2, tab3 = st.tabs(["Supplier Follow-ups", "Customer Emails", "Comms Pack"])
 
 with tab1:
-    st.caption("Supplier-facing outreach based on OPEN follow-ups (unresolved only).")
-
-    followups_for_ops = followups_open if isinstance(followups_open, pd.DataFrame) else followups
-
-    if callable(enrich_followups_with_contact_fields):
-        followups_for_ops = enrich_followups_with_contact_fields(followups_for_ops, ISSUE_TRACKER_PATH)
-
-    if followups_for_ops is None or followups_for_ops.empty:
-        st.info("No supplier follow-ups needed.")
-    else:
-        summary_cols = [
-            c
-            for c in [
-                "supplier_name",
-                "supplier_email",
-                "worst_escalation",
-                "urgency",
-                "item_count",
-                "order_ids",
-                "contact_status",
-                "follow_up_count",
-            ]
-            if c in followups_for_ops.columns
-        ]
-        st.dataframe(
-            followups_for_ops[summary_cols] if summary_cols else followups_for_ops,
-            use_container_width=True,
-            height=220,
+    if callable(render_supplier_followups_tab):
+        render_supplier_followups_tab(
+            followups_open=followups_open if isinstance(followups_open, pd.DataFrame) else pd.DataFrame(),
+            issue_tracker_path=ISSUE_TRACKER_PATH,
+            contact_statuses=CONTACT_STATUSES,
+            mailto_link_fn=mailto_link if callable(mailto_link) else None,
+            scorecard=scorecard if isinstance(scorecard, pd.DataFrame) else None,
+            build_supplier_accountability_view=build_supplier_accountability_view
+            if callable(build_supplier_accountability_view)
+            else None,
+            render_supplier_accountability=render_supplier_accountability
+            if callable(render_supplier_accountability)
+            else None,
+            key_prefix="supplier_followups",
         )
-
-        if "supplier_name" in followups_for_ops.columns and len(followups_for_ops) > 0:
-            chosen = st.selectbox(
-                "Supplier",
-                followups_for_ops["supplier_name"].tolist(),
-                key="supplier_email_preview_select",
-            )
-            row = followups_for_ops[followups_for_ops["supplier_name"] == chosen].iloc[0]
-
-            supplier_email = str(row.get("supplier_email", "")).strip()
-            order_ids = str(row.get("order_ids", "")).strip()
-
-            default_subject = str(row.get("subject", "")).strip() or f"Urgent: shipment status update needed ({chosen})"
-            st.markdown("#### Supplier Email Generator (3 questions)")
-            subj = st.text_input("Subject", value=default_subject, key="supplier_email_subject")
-
-            bullets = [
-                "Can you confirm what’s causing the delay / issue on these shipments?",
-                "What is the updated ship date (or delivery ETA) for each impacted order?",
-                "Please share tracking numbers (or confirm next step + timeline if tracking is not available yet).",
-            ]
-            bullet_text = "\n".join([f"• {b}" for b in bullets])
-
-            body_default = "\n".join(
-                [
-                    f"Hi {chosen},",
-                    "",
-                    "We’re seeing issues on the following order(s):",
-                    f"{order_ids if order_ids else '(order list unavailable)'}",
-                    "",
-                    "Can you help with the following:",
-                    bullet_text,
-                    "",
-                    "Thanks,",
-                ]
-            )
-            body = st.text_area("Body", value=body_default, height=240, key="supplier_email_body")
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                copy_button(supplier_email, "Copy supplier email", key=f"copy_supplier_email_{chosen}")
-            with c2:
-                copy_button(subj, "Copy subject", key=f"copy_supplier_subject_{chosen}")
-            with c3:
-                copy_button(body, "Copy body", key=f"copy_supplier_body_{chosen}")
-
-            _ml = mailto_link if callable(mailto_link) else _mailto_fallback
-            compose_url = _ml(supplier_email, subj, body)
-            try:
-                st.link_button("📧 One-click compose email", compose_url, use_container_width=True)
-            except Exception:
-                st.markdown(f"[📧 One-click compose email]({compose_url})")
+    else:
+        st.info("Supplier Follow-ups UI module not available.")
 
 with tab2:
     st.caption("Customer-facing updates (email-first).")
