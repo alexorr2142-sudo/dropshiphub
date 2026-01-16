@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Optional, Callable
+import inspect
 
 import pandas as pd
 import streamlit as st
@@ -15,12 +16,20 @@ class _ShellDeps:
     render_sidebar_context: Callable[..., dict]
     render_onboarding_checklist: Optional[Callable[..., Any]]
 
-    # inputs + pipeline
-    render_upload_and_templates: Callable[..., dict]
-    resolve_raw_inputs: Callable[..., tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]
-    stop_if_missing_required_inputs: Callable[..., None]
-    normalize_inputs: Callable[..., tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]
-    reconcile_with_debug: Callable[..., tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]]
+    # inputs + pipeline (sections)
+    render_upload_and_templates: Callable[..., Any]
+    resolve_raw_inputs: Callable[..., Any]
+    stop_if_missing_required_inputs: Callable[..., Any]
+    normalize_inputs: Callable[..., Any]
+    reconcile_with_debug: Callable[..., Any]
+
+    # injected pipeline callables (older app_sections expects these)
+    normalize_orders: Callable[..., Any]
+    normalize_shipments: Callable[..., Any]
+    normalize_tracking: Callable[..., Any]
+    reconcile_all: Callable[..., Any]
+
+    # pipeline runner
     run_pipeline: Callable[..., dict]
 
     # workspaces + issue tracker path helper
@@ -44,6 +53,20 @@ class _ShellDeps:
     init_paths: Callable[..., tuple[Path, Path, Path, Path]]
 
 
+def _call_with_accepted_kwargs(fn: Callable[..., Any], **kwargs):
+    """
+    Backward-compat call helper:
+    only passes kwargs that exist in fn's signature.
+    """
+    try:
+        sig = inspect.signature(fn)
+        accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        return fn(**accepted)
+    except Exception:
+        # If signature inspection fails for any reason, fall back to direct call.
+        return fn(**kwargs)
+
+
 def _safe_imports() -> _ShellDeps:
     # Sidebar + onboarding
     from ui.sidebar import render_sidebar_context
@@ -52,14 +75,10 @@ def _safe_imports() -> _ShellDeps:
     except Exception:
         render_onboarding_checklist = None
 
-    # Inputs + sections
-    from ui.app_sections import (
-        render_upload_and_templates,
-        resolve_raw_inputs,
-        stop_if_missing_required_inputs,
-        normalize_inputs,
-        reconcile_with_debug,
-    )
+    # Sections (uploads / normalization / reconciliation)
+    from ui import app_sections as sections
+
+    # Pipeline runner
     from ui.app_pipeline import run_pipeline
 
     # Workspaces + core helpers
@@ -98,14 +117,31 @@ def _safe_imports() -> _ShellDeps:
     except Exception:
         render_kpi_trends = None
 
+    # Core-ish callables (older sections API expects these injected)
+    # Keep imports inside _safe_imports so failures show as import errors, not silent crashes.
+    try:
+        from normalize import normalize_orders, normalize_shipments, normalize_tracking
+    except Exception:
+        # Fallback path if you moved these under core/
+        from core.normalize import normalize_orders, normalize_shipments, normalize_tracking  # type: ignore
+
+    try:
+        from reconcile import reconcile_all
+    except Exception:
+        from core.reconcile import reconcile_all  # type: ignore
+
     return _ShellDeps(
         render_sidebar_context=render_sidebar_context,
         render_onboarding_checklist=render_onboarding_checklist,
-        render_upload_and_templates=render_upload_and_templates,
-        resolve_raw_inputs=resolve_raw_inputs,
-        stop_if_missing_required_inputs=stop_if_missing_required_inputs,
-        normalize_inputs=normalize_inputs,
-        reconcile_with_debug=reconcile_with_debug,
+        render_upload_and_templates=sections.render_upload_and_templates,
+        resolve_raw_inputs=sections.resolve_raw_inputs,
+        stop_if_missing_required_inputs=sections.stop_if_missing_required_inputs,
+        normalize_inputs=sections.normalize_inputs,
+        reconcile_with_debug=sections.reconcile_with_debug,
+        normalize_orders=normalize_orders,
+        normalize_shipments=normalize_shipments,
+        normalize_tracking=normalize_tracking,
+        reconcile_all=reconcile_all,
         run_pipeline=run_pipeline,
         render_workspaces_sidebar=render_workspaces_sidebar,
         workspace_root=workspace_root,
@@ -158,43 +194,64 @@ def render_app() -> None:
             st.warning("Onboarding checklist failed to render (non-critical).")
 
     # Uploads + templates (must fail-safe; demo must still run)
-    files: Dict[str, Any] = {}
     try:
-        maybe_files = deps.render_upload_and_templates()
-        if maybe_files is None:
-            files = {}
-        elif isinstance(maybe_files, dict):
-            files = maybe_files
-        else:
-            st.warning("Uploads UI returned an unexpected type; proceeding without uploads (non-critical).")
-            files = {}
+        uploads = _call_with_accepted_kwargs(deps.render_upload_and_templates)
     except Exception as e:
         st.warning("Uploads / templates UI failed; proceeding without uploads (non-critical).")
         st.code(str(e))
-        files = {}
+        uploads = None
 
-    # Raw inputs (demo-safe)
-    raw_orders, raw_shipments, raw_tracking = deps.resolve_raw_inputs(
-        data_dir=data_dir,
-        uploaded_orders=files.get("orders_file"),
-        uploaded_shipments=files.get("shipments_file"),
-        uploaded_tracking=files.get("tracking_file"),
+    # Raw inputs (demo-safe) — support both old/new sections signatures via accepted-kwargs
+    raw_orders, raw_shipments, raw_tracking = _call_with_accepted_kwargs(
+        deps.resolve_raw_inputs,
+        demo_mode_active=demo_mode,
         demo_mode=demo_mode,
+        data_dir=data_dir,
+        uploads=uploads,
+        uploaded_orders=getattr(uploads, "f_orders", None),
+        uploaded_shipments=getattr(uploads, "f_shipments", None),
+        uploaded_tracking=getattr(uploads, "f_tracking", None),
+        orders_df=None,
+        shipments_df=None,
+        tracking_df=None,
     )
 
-    # Stop if required inputs are missing (unless demo)
-    deps.stop_if_missing_required_inputs(
+    # Stop if required inputs are missing (unless demo) — tolerate both signatures
+    _call_with_accepted_kwargs(
+        deps.stop_if_missing_required_inputs,
+        raw_orders=raw_orders,
+        raw_shipments=raw_shipments,
+        raw_tracking=raw_tracking,
         orders_df=raw_orders,
         shipments_df=raw_shipments,
         demo_mode=demo_mode,
+        demo_mode_active=demo_mode,
     )
 
-    # Normalize + reconcile (debug bundle comes from reconcile_with_debug)
-    orders, shipments, tracking = deps.normalize_inputs(raw_orders, raw_shipments, raw_tracking)
-    exceptions, followups_full, order_rollup, kpis = deps.reconcile_with_debug(
+    # Normalize — sections API expects injected normalize_* callables (older style)
+    orders, shipments, tracking, _meta = _call_with_accepted_kwargs(
+        deps.normalize_inputs,
+        raw_orders=raw_orders,
+        raw_shipments=raw_shipments,
+        raw_tracking=raw_tracking,
+        normalize_orders=deps.normalize_orders,
+        normalize_shipments=deps.normalize_shipments,
+        normalize_tracking=deps.normalize_tracking,
+        account_id=account_id,
+        store_id=store_id,
+        platform_hint=platform_hint,
+        default_currency=default_currency,
+        default_promised_ship_days=promised_days,
+        promised_ship_days=promised_days,
+    )
+
+    # Reconcile — sections API expects injected reconcile_all (older style)
+    line_status_df, exceptions, followups_full, order_rollup, kpis = _call_with_accepted_kwargs(
+        deps.reconcile_with_debug,
         orders=orders,
         shipments=shipments,
         tracking=tracking,
+        reconcile_all=deps.reconcile_all,
         platform_hint=platform_hint,
         default_currency=default_currency,
         promised_ship_days=promised_days,
@@ -206,7 +263,8 @@ def render_app() -> None:
     issue_tracker_path = deps.issue_tracker_path_for_ws_root(ws_root)
 
     # Pipeline (customer impact, scorecards, escalations, mailto packs, etc.)
-    pipe = deps.run_pipeline(
+    pipe = _call_with_accepted_kwargs(
+        deps.run_pipeline,
         account_id=account_id,
         store_id=store_id,
         platform_hint=platform_hint,
@@ -220,15 +278,28 @@ def render_app() -> None:
         followups_full=followups_full,
         order_rollup=order_rollup,
         kpis=kpis,
+        line_status_df=line_status_df,
         issue_tracker_path=issue_tracker_path,
     )
 
     # Optional: workspaces sidebar (save/load) can override what we show
     # If missing, we just show the current pipeline output.
-    view = dict(pipe)
+    view = dict(pipe) if isinstance(pipe, dict) else {}
+    if "exceptions" not in view:
+        view["exceptions"] = exceptions
+    if "followups_open" not in view:
+        view["followups_open"] = followups_full
+    if "order_rollup" not in view:
+        view["order_rollup"] = order_rollup
+    if "kpis" not in view:
+        view["kpis"] = kpis
+    if "line_status_df" not in view:
+        view["line_status_df"] = line_status_df
+
     if callable(deps.render_workspaces_sidebar):
         try:
-            ws_result = deps.render_workspaces_sidebar(
+            ws_result = _call_with_accepted_kwargs(
+                deps.render_workspaces_sidebar,
                 workspaces_dir=workspaces_dir,
                 account_id=account_id,
                 store_id=store_id,
@@ -239,11 +310,12 @@ def render_app() -> None:
                 orders=orders,
                 shipments=shipments,
                 tracking=tracking,
-                exceptions=pipe.get("exceptions", exceptions),
-                followups_full=pipe.get("followups_full", followups_full),
-                order_rollup=pipe.get("order_rollup", order_rollup),
-                line_status_df=pipe.get("line_status_df", pd.DataFrame()),
-                kpis=pipe.get("kpis", kpis),
+                exceptions=view.get("exceptions", pd.DataFrame()),
+                followups_full=view.get("followups_full", followups_full),
+                followups_open=view.get("followups_open", pd.DataFrame()),
+                order_rollup=view.get("order_rollup", pd.DataFrame()),
+                line_status_df=view.get("line_status_df", pd.DataFrame()),
+                kpis=view.get("kpis", {}),
             )
             # If user loaded a saved run, prefer those outputs for rendering
             if getattr(ws_result, "loaded_run_dir", None):
