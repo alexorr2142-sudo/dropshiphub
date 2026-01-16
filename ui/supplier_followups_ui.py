@@ -13,15 +13,12 @@ from ui.issue_tracker_ui import (
     enrich_followups_with_contact_fields,
     enrich_followups_with_issue_fields,
 )
-from ui.timeline_ui import render_timeline_panel
 
 ISSUE_STATUSES = ["Open", "Waiting", "Resolved"]
 
 
 def _mailto_fallback(to: str, subject: str, body: str) -> str:
-    # Local fallback (keeps this file self-contained)
     from urllib.parse import quote
-
     return f"mailto:{quote(to or '')}?subject={quote(subject or '')}&body={quote(body or '')}"
 
 
@@ -40,30 +37,27 @@ def render_supplier_followups_tab(
     contact_statuses: list[str],
     mailto_link_fn: Optional[Callable[[str, str, str], str]] = None,
     scorecard: Optional[pd.DataFrame] = None,
-    # Optional supplier accountability hook (keeps deps optional)
     build_supplier_accountability_view: Optional[Callable[..., object]] = None,
     render_supplier_accountability: Optional[Callable[..., None]] = None,
     key_prefix: str = "supplier_followups",
 ) -> None:
     """
-    Renders the entire "Supplier Follow-ups" tab.
+    Supplier Follow-ups (unresolved only).
 
-    Preserves features:
+    Preserves:
       - OPEN followups preview
-      - contact_status + follow_up_count columns from IssueTrackerStore contact object
+      - contact_status + follow_up_count
       - Supplier email generator (3 questions)
-      - Copy buttons for email/subject/body
-      - Download .txt of the supplier email
-      - One-click compose email (mailto)
-      - Mark contacted, Follow-up +1, bulk contact status set for all issue_ids under supplier
+      - Copy buttons + Download .txt + One-click compose (mailto)
+      - Mark contacted + Follow-up +1 + bulk contact status set
       - Supplier Accountability (Auto) panel if hooks provided
 
-    Adds (Feature #3: Ownership & Follow-Through):
-      - owner / issue_status / next_action_at shown in preview
-      - bulk set owner / issue status / next action for selected supplier's issues
+    Adds (Ownership & Follow-through):
+      - owner / issue_status / next_action_at in preview
+      - bulk set owner / issue status / next action
 
-    Adds (Feature #1: Timeline visibility):
-      - Shows recent timeline events for the selected supplier’s issues
+    Adds (Timeline):
+      - supplier-filtered timeline panel for visibility + audit
     """
     st.caption("Supplier-facing outreach based on OPEN follow-ups (unresolved only).")
 
@@ -76,13 +70,11 @@ def render_supplier_followups_tab(
     # ----------------------------
     show_df = followups_open.copy()
 
-    # Enrich with contact fields for the preview table
     try:
         show_df = enrich_followups_with_contact_fields(show_df, issue_tracker_path=issue_tracker_path)
     except Exception:
         pass
 
-    # Enrich with ownership fields (optional)
     try:
         show_df = enrich_followups_with_issue_fields(show_df, issue_tracker_path=issue_tracker_path)
     except Exception:
@@ -108,7 +100,7 @@ def render_supplier_followups_tab(
     st.dataframe(show_df[summary_cols] if summary_cols else show_df, use_container_width=True, height=220)
 
     # ----------------------------
-    # Supplier selection + email generator
+    # Supplier selection
     # ----------------------------
     if "supplier_name" not in followups_open.columns or len(followups_open) == 0:
         st.info("Follow-ups are missing supplier_name, so email generation is unavailable.")
@@ -123,6 +115,26 @@ def render_supplier_followups_tab(
     chosen = st.selectbox("Supplier", suppliers, key=f"{key_prefix}_supplier_select")
     row = _first_row_for_supplier(followups_open, chosen)
 
+    # ----------------------------
+    # Supplier-specific Timeline (NEW)
+    # ----------------------------
+    try:
+        from ui.timeline_ui import render_timeline_panel
+        from core.timeline_store import timeline_path_for_issue_tracker_path
+
+        render_timeline_panel(
+            timeline_path=timeline_path_for_issue_tracker_path(issue_tracker_path),
+            title=f"Timeline — {chosen}",
+            supplier_name=chosen,
+            limit=75,
+            key_prefix=f"{key_prefix}_timeline_{chosen}",
+        )
+    except Exception:
+        pass
+
+    # ----------------------------
+    # Email generator
+    # ----------------------------
     supplier_email = str(row.get("supplier_email", "")).strip()
     order_ids = str(row.get("order_ids", "")).strip()
 
@@ -209,7 +221,6 @@ def render_supplier_followups_tab(
                     )
                 except Exception:
                     pass
-            # Best-effort: supplier outreach usually implies Waiting
             for iid in issue_ids:
                 try:
                     store.set_issue_status(iid, "Waiting")
@@ -234,7 +245,7 @@ def render_supplier_followups_tab(
             st.rerun()
 
     # ----------------------------
-    # Bulk contact status set (existing)
+    # Bulk contact status set
     # ----------------------------
     if contact_statuses:
         default_idx = contact_statuses.index("Waiting") if "Waiting" in contact_statuses else 0
@@ -254,7 +265,7 @@ def render_supplier_followups_tab(
             st.rerun()
 
     # ----------------------------
-    # NEW: Ownership & Follow-through bulk actions
+    # Ownership & Follow-through bulk actions
     # ----------------------------
     st.divider()
     st.markdown("#### Ownership & Next Action (Bulk)")
@@ -271,7 +282,7 @@ def render_supplier_followups_tab(
         issue_status_val = st.selectbox(
             "Issue status",
             options=ISSUE_STATUSES,
-            index=1,  # Waiting default tends to match follow-up flow
+            index=1,
             key=f"{key_prefix}_issue_status_bulk_{chosen}",
         )
     with o3:
@@ -296,18 +307,13 @@ def render_supplier_followups_tab(
             st.rerun()
 
     with b2:
-        if st.button(
-            "💾 Save issue status",
-            use_container_width=True,
-            key=f"{key_prefix}_btn_issue_status_save_{chosen}",
-        ):
+        if st.button("💾 Save issue status", use_container_width=True, key=f"{key_prefix}_btn_issue_status_save_{chosen}"):
             saved = 0
             for iid in issue_ids:
                 try:
                     store.set_issue_status(iid, issue_status_val)
                     saved += 1
                 except Exception:
-                    # fallback for old core: if resolved, at least mark resolved
                     if issue_status_val == "Resolved":
                         try:
                             store.set_resolved(iid, True)
@@ -318,11 +324,7 @@ def render_supplier_followups_tab(
             st.rerun()
 
     with b3:
-        if st.button(
-            "💾 Save next action",
-            use_container_width=True,
-            key=f"{key_prefix}_btn_next_action_save_{chosen}",
-        ):
+        if st.button("💾 Save next action", use_container_width=True, key=f"{key_prefix}_btn_next_action_save_{chosen}"):
             saved = 0
             for iid in issue_ids:
                 try:
@@ -344,7 +346,6 @@ def render_supplier_followups_tab(
         st.divider()
         st.markdown("#### Supplier Accountability (Auto)")
         try:
-            # Support multiple signatures
             import inspect
 
             sig = inspect.signature(build_supplier_accountability_view)
@@ -365,23 +366,3 @@ def render_supplier_followups_tab(
         except Exception as e:
             st.warning("Supplier accountability failed to render.")
             st.code(str(e))
-
-    # ----------------------------
-    # Timeline (optional, fail-safe)
-    # ----------------------------
-    try:
-        from core.timeline_store import timeline_path_for_issue_tracker_path
-
-        timeline_path = timeline_path_for_issue_tracker_path(issue_tracker_path)
-
-        render_timeline_panel(
-            timeline_path=timeline_path,
-            title="🕒 Recent Timeline Events (for this supplier’s issues)",
-            issue_ids=issue_ids,  # tight filter
-            supplier_name="",  # issue_ids already filters tightly
-            limit=200,
-            key_prefix=f"{key_prefix}_timeline_{chosen}",
-        )
-    except Exception:
-        # Optional feature must never break the app
-        pass
