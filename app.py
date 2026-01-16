@@ -14,8 +14,9 @@ try:
     from reconcile import reconcile_all
     from explain import enhance_explanations
 except Exception as e:
-    st.set_page_config(page_title="Dropship Hub", layout="wide")
-    st.title("Dropship Hub")
+    st.set_page_config(page_title="ClearOps", layout="wide")
+    st.title("ClearOps")
+    st.caption("Operational clarity, when it matters.")
     st.error("Import error: one of your local .py files is missing or has an error.")
     st.code(str(e))
     st.stop()
@@ -192,7 +193,9 @@ from ui.app_views import (
 # ============================================================
 # Page setup
 # ============================================================
-st.set_page_config(page_title="Dropship Hub", layout="wide")
+st.set_page_config(page_title="ClearOps", layout="wide")
+st.title("ClearOps")
+st.caption("Operational clarity, when it matters.")
 
 # ============================================================
 # Paths
