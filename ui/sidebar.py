@@ -106,8 +106,14 @@ def render_sidebar_context(
             help="Keeps demo data and your edits across interactions until you turn it off.",
         )
 
-        # Keep a single canonical boolean in session_state for other modules to read safely
-        st.session_state["demo_mode"] = bool(demo_mode)
+        # Keep a canonical boolean in session_state for other modules to read safely
+        # Streamlit may throw if 'demo_mode' is (or was) bound to a widget key elsewhere.
+        demo_mode_bool = bool(demo_mode)
+        try:
+            st.session_state["demo_mode"] = demo_mode_bool
+        except Exception:
+            # Fallback key that will not collide with any widget
+            st.session_state["app_demo_mode"] = demo_mode_bool
 
         # ----------------
         # Supplier Directory (CRM)
@@ -169,6 +175,11 @@ def render_sidebar_context(
 
     suppliers_df = st.session_state.get(f"{key_prefix}_suppliers_df_cache", pd.DataFrame())
 
+    # Read canonical demo mode without crashing even if Streamlit blocked 'demo_mode'
+    effective_demo_mode = bool(
+        st.session_state.get("demo_mode", st.session_state.get("app_demo_mode", False))
+    )
+
     return {
         "account_id": account_id,
         "store_id": store_id,
@@ -176,5 +187,5 @@ def render_sidebar_context(
         "default_currency": default_currency,
         "default_promised_ship_days": int(default_promised_ship_days),
         "suppliers_df": suppliers_df,
-        "demo_mode": bool(st.session_state.get("demo_mode", False)),
+        "demo_mode": effective_demo_mode,
     }
