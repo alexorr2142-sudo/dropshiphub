@@ -27,7 +27,7 @@ except Exception as e:
 # ============================================================
 from core.ops_pack import make_daily_ops_pack_bytes
 from core.scorecards import build_supplier_scorecard_from_run, load_recent_scorecard_history
-from core.styling import add_urgency_column, style_exceptions_table
+from core.styling import add_urgency_column, style_exceptions_table, copy_button
 from core.suppliers import (
     enrich_followups_with_suppliers,
     add_missing_supplier_contact_exceptions,
@@ -66,6 +66,15 @@ try:
     from core.supplier_accountability import build_supplier_accountability_view  # type: ignore
 except Exception:
     build_supplier_accountability_view = None
+
+# Optional timeline
+TimelineStore = None
+timeline_path_for_ws_root = None
+try:
+    from core.timeline_store import TimelineStore, timeline_path_for_ws_root  # type: ignore
+except Exception:
+    TimelineStore = None
+    timeline_path_for_ws_root = None
 
 # ============================================================
 # UI modules
@@ -122,22 +131,14 @@ try:
 except Exception:
     render_workspaces_sidebar_and_maybe_override_outputs = None
 
-derive_followups_open = None
-enrich_followups_with_contact_fields = None
+# Issue tracker (with helper wrapper)
+apply_issue_tracker = None
 render_issue_tracker_maintenance = None
-render_issue_ownership_panel = None
 try:
-    from ui.issue_tracker_ui import (  # type: ignore
-        derive_followups_open,
-        enrich_followups_with_contact_fields,
-        render_issue_tracker_maintenance,
-        render_issue_ownership_panel,
-    )
+    from ui.issue_tracker_ui import apply_issue_tracker, render_issue_tracker_maintenance  # type: ignore
 except Exception:
-    derive_followups_open = None
-    enrich_followups_with_contact_fields = None
+    apply_issue_tracker = None
     render_issue_tracker_maintenance = None
-    render_issue_ownership_panel = None
 
 render_sla_escalations = None
 try:
@@ -175,19 +176,20 @@ try:
 except Exception:
     render_supplier_accountability = None
 
-# NEW: use the real supplier followups tab (you updated this file already)
+# NEW: Supplier follow-ups tab (dedicated module)
 render_supplier_followups_tab = None
 try:
     from ui.supplier_followups_ui import render_supplier_followups_tab  # type: ignore
 except Exception:
     render_supplier_followups_tab = None
 
-# NEW: dashboard timeline
+# Timeline panel UI (optional)
 render_timeline_panel = None
 try:
     from ui.timeline_ui import render_timeline_panel  # type: ignore
 except Exception:
     render_timeline_panel = None
+
 
 # ============================================================
 # Helpers
@@ -205,6 +207,19 @@ def _mailto_fallback(to: str, subject: str, body: str) -> str:
 
 def _is_empty_df(x) -> bool:
     return (x is None) or (not isinstance(x, pd.DataFrame)) or x.empty
+
+
+def _log_run_event(ws_root: Path, event_type: str, summary: str, data: dict | None = None) -> None:
+    """
+    Best-effort system-level timeline logging. Never raises.
+    """
+    try:
+        if TimelineStore is None or timeline_path_for_ws_root is None:
+            return
+        tl = TimelineStore(timeline_path_for_ws_root(ws_root))
+        tl.log(scope="system", event_type=event_type, summary=summary, data=data or {}, actor="system")
+    except Exception:
+        return
 
 
 # ============================================================
@@ -231,7 +246,6 @@ SUPPLIERS_DIR.mkdir(parents=True, exist_ok=True)
 if callable(render_sidebar_context):
     ctx = render_sidebar_context(DATA_DIR, WORKSPACES_DIR, SUPPLIERS_DIR)
 else:
-    # minimal fallback so app still runs
     with st.sidebar:
         st.header("Tenant")
         account_id = st.text_input("account_id", value="demo_account", key="tenant_account_id")
@@ -274,6 +288,11 @@ default_promised_ship_days = int(ctx["default_promised_ship_days"])
 suppliers_df = ctx.get("suppliers_df", pd.DataFrame())
 demo_mode_active = bool(ctx.get("demo_mode", False))
 
+# Per-tenant workspace root
+ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
+ws_root.mkdir(parents=True, exist_ok=True)
+ISSUE_TRACKER_PATH = Path(ws_root) / "issue_tracker.json"
+
 # ============================================================
 # Diagnostics UI (optional)
 # ============================================================
@@ -306,6 +325,13 @@ if callable(render_diagnostics):
     )
 
 # ============================================================
+# Sidebar maintenance (issue tracker)
+# ============================================================
+with st.sidebar:
+    if callable(render_issue_tracker_maintenance) and (IssueTrackerStore is not None):
+        render_issue_tracker_maintenance(ISSUE_TRACKER_PATH, default_prune_days=30)
+
+# ============================================================
 # Onboarding checklist (optional)
 # ============================================================
 if callable(render_onboarding_checklist):
@@ -336,23 +362,11 @@ else:
     st.subheader("Upload your data")
     c1, c2, c3 = st.columns(3)
     with c1:
-        f_orders = st.file_uploader(
-            "Orders CSV (Shopify export or generic)",
-            type=["csv"],
-            key="uploader_orders",
-        )
+        f_orders = st.file_uploader("Orders CSV (Shopify export or generic)", type=["csv"], key="uploader_orders")
     with c2:
-        f_shipments = st.file_uploader(
-            "Shipments CSV (supplier export)",
-            type=["csv"],
-            key="uploader_shipments",
-        )
+        f_shipments = st.file_uploader("Shipments CSV (supplier export)", type=["csv"], key="uploader_shipments")
     with c3:
-        f_tracking = st.file_uploader(
-            "Tracking CSV\n(optional)",
-            type=["csv"],
-            key="uploader_tracking",
-        )
+        f_tracking = st.file_uploader("Tracking CSV\n(optional)", type=["csv"], key="uploader_tracking")
     uploads = type(
         "U",
         (),
@@ -396,7 +410,7 @@ else:
         raw_tracking = pd.read_csv(uploads.f_tracking) if uploads.f_tracking else pd.DataFrame()
 
 # ============================================================
-# BUGFIX: stop early if Orders/Shipments are empty (avoid reconcile crash)
+# Stop early if Orders/Shipments are empty (avoid reconcile crash)
 # ============================================================
 if _is_empty_df(raw_orders) or _is_empty_df(raw_shipments):
     st.divider()
@@ -498,6 +512,17 @@ except Exception as e:
 
     st.stop()
 
+# System timeline event (best-effort)
+_log_run_event(
+    ws_root,
+    event_type="run.reconciled",
+    summary="Reconciliation completed",
+    data={
+        "exceptions": int(len(exceptions)) if isinstance(exceptions, pd.DataFrame) else 0,
+        "followups": int(len(followups)) if isinstance(followups, pd.DataFrame) else 0,
+    },
+)
+
 # Explain enhancements (best-effort)
 try:
     exceptions = enhance_explanations(exceptions)
@@ -516,10 +541,9 @@ if exceptions is not None and not exceptions.empty and "Urgency" not in exceptio
 scorecard = build_supplier_scorecard_from_run(line_status_df, exceptions)
 
 # ============================================================
-# SLA Escalations + followups_full/open
+# SLA Escalations + followups_full
 # ============================================================
 followups_full = followups.copy() if isinstance(followups, pd.DataFrame) else pd.DataFrame()
-followups_open = followups_full.copy()
 escalations_df = pd.DataFrame()
 
 if render_sla_escalations is not None:
@@ -534,23 +558,25 @@ if render_sla_escalations is not None:
     except Exception:
         pass
 
-# Per-tenant issue tracker path
-ws_root = workspace_root(WORKSPACES_DIR, account_id, store_id)
-ws_root.mkdir(parents=True, exist_ok=True)
-ISSUE_TRACKER_PATH = Path(ws_root) / "issue_tracker.json"
+# ============================================================
+# Issue Tracker wrapper (OPEN + enriched)
+# ============================================================
+followups_open = followups_full.copy()
+followups_open_enriched = followups_open.copy()
 
-# Sidebar maintenance (if UI exists)
-with st.sidebar:
-    if callable(render_issue_tracker_maintenance) and (IssueTrackerStore is not None):
-        render_issue_tracker_maintenance(ISSUE_TRACKER_PATH, default_prune_days=30)
-
-# Derive OPEN from FULL using issue tracker state
-if callable(derive_followups_open):
-    followups_open = derive_followups_open(followups_full, ISSUE_TRACKER_PATH)
+if callable(apply_issue_tracker):
+    try:
+        it = apply_issue_tracker(ws_root=ws_root, followups_full=followups_full)
+        ISSUE_TRACKER_PATH = it["issue_tracker_path"]
+        followups_full = it["followups_full"]
+        followups_open = it["followups_open"]
+        followups_open_enriched = it.get("followups_open_enriched", followups_open)
+    except Exception:
+        pass
 else:
+    # fallback: if no wrapper, keep current behavior
     followups_open = followups_full.copy()
-
-followups = followups_open
+    followups_open_enriched = followups_open.copy()
 
 # ============================================================
 # Customer impact build
@@ -577,11 +603,18 @@ ops_pack_bytes = make_daily_ops_pack_bytes(
     supplier_scorecards=scorecard,
 )
 
+_log_run_event(
+    ws_root,
+    event_type="run.ops_pack_generated",
+    summary="Ops pack generated",
+    data={"pack_name": pack_name},
+)
+
 # ============================================================
 # Workspaces sidebar (optional UI module)
 # ============================================================
 if callable(render_workspaces_sidebar_and_maybe_override_outputs):
-    exceptions, followups, order_rollup, line_status_df, suppliers_df = render_workspaces_sidebar_and_maybe_override_outputs(
+    exceptions, followups_full2, order_rollup, line_status_df, suppliers_df = render_workspaces_sidebar_and_maybe_override_outputs(
         workspaces_dir=WORKSPACES_DIR,
         account_id=account_id,
         store_id=store_id,
@@ -597,9 +630,19 @@ if callable(render_workspaces_sidebar_and_maybe_override_outputs):
         suppliers_df=suppliers_df if suppliers_df is not None else pd.DataFrame(),
     )
 
-    if callable(derive_followups_open):
-        followups_open = derive_followups_open(followups, ISSUE_TRACKER_PATH)
-        followups = followups_open
+    if isinstance(followups_full2, pd.DataFrame):
+        followups_full = followups_full2.copy()
+
+    # Re-apply issue tracker after override
+    if callable(apply_issue_tracker):
+        try:
+            it = apply_issue_tracker(ws_root=ws_root, followups_full=followups_full)
+            ISSUE_TRACKER_PATH = it["issue_tracker_path"]
+            followups_full = it["followups_full"]
+            followups_open = it["followups_open"]
+            followups_open_enriched = it.get("followups_open_enriched", followups_open)
+        except Exception:
+            pass
 
 # ============================================================
 # Dashboard KPIs
@@ -621,21 +664,23 @@ if build_daily_action_list is not None and render_daily_action_list is not None:
     except Exception:
         pass
 
-# NEW: recent activity timeline
+if render_kpi_trends is not None:
+    try:
+        render_kpi_trends(workspaces_dir=WORKSPACES_DIR, account_id=account_id, store_id=store_id)
+    except Exception:
+        pass
+
+# ============================================================
+# Optional: Timeline (system)
+# ============================================================
 if callable(render_timeline_panel):
     try:
         render_timeline_panel(
             timeline_path=(ws_root / "timeline.jsonl"),
-            title="Recent activity (Timeline)",
-            limit=50,
-            key_prefix="dash_timeline",
+            title="Timeline (System + Issues)",
+            limit=100,
+            key_prefix="timeline_system",
         )
-    except Exception:
-        pass
-
-if render_kpi_trends is not None:
-    try:
-        render_kpi_trends(workspaces_dir=WORKSPACES_DIR, account_id=account_id, store_id=store_id)
     except Exception:
         pass
 
@@ -652,18 +697,6 @@ else:
     else:
         st.dataframe(style_exceptions_table(exceptions.head(10)), use_container_width=True, height=320)
 
-# NEW: Ownership panel in triage (optional but high impact)
-if callable(render_issue_ownership_panel):
-    try:
-        render_issue_ownership_panel(
-            followups_df=followups_open if isinstance(followups_open, pd.DataFrame) else pd.DataFrame(),
-            issue_tracker_path=ISSUE_TRACKER_PATH,
-            title="Ownership & Follow-through",
-            key_prefix="triage_owner",
-        )
-    except Exception:
-        pass
-
 # ============================================================
 # Ops Outreach (Comms)
 # ============================================================
@@ -674,21 +707,17 @@ tab1, tab2, tab3 = st.tabs(["Supplier Follow-ups", "Customer Emails", "Comms Pac
 with tab1:
     if callable(render_supplier_followups_tab):
         render_supplier_followups_tab(
-            followups_open=followups_open if isinstance(followups_open, pd.DataFrame) else pd.DataFrame(),
+            followups_open=followups_open,
             issue_tracker_path=ISSUE_TRACKER_PATH,
             contact_statuses=CONTACT_STATUSES,
-            mailto_link_fn=mailto_link if callable(mailto_link) else None,
-            scorecard=scorecard if isinstance(scorecard, pd.DataFrame) else None,
-            build_supplier_accountability_view=build_supplier_accountability_view
-            if callable(build_supplier_accountability_view)
-            else None,
-            render_supplier_accountability=render_supplier_accountability
-            if callable(render_supplier_accountability)
-            else None,
+            mailto_link_fn=mailto_link if callable(mailto_link) else _mailto_fallback,
+            scorecard=scorecard,
+            build_supplier_accountability_view=build_supplier_accountability_view,
+            render_supplier_accountability=render_supplier_accountability,
             key_prefix="supplier_followups",
         )
     else:
-        st.info("Supplier Follow-ups UI module not available.")
+        st.warning("ui/supplier_followups_ui.py is not available.")
 
 with tab2:
     st.caption("Customer-facing updates (email-first).")
@@ -870,6 +899,7 @@ else:
         runs_for_trend = []
         try:
             from core.workspaces import list_runs
+
             runs_for_trend = list_runs(ws_root)
         except Exception:
             runs_for_trend = []
@@ -893,7 +923,11 @@ else:
 
                 tcols = ["run_id", "total_lines", "exception_lines", "exception_rate", "critical", "high"]
                 tcols = [c for c in tcols if c in s_hist.columns]
-                st.dataframe(s_hist[tcols].sort_values("run_id", ascending=False), use_container_width=True, height=220)
+                st.dataframe(
+                    s_hist[tcols].sort_values("run_id", ascending=False),
+                    use_container_width=True,
+                    height=220,
+                )
 
 # ============================================================
 # SLA Escalations panel (table)
