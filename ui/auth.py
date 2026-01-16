@@ -1,12 +1,16 @@
 # ui/auth.py
+from __future__ import annotations
+
 import os
 import streamlit as st
+
 
 def _parse_allowed_emails_from_env() -> list[str]:
     raw = os.getenv("DSH_ALLOWED_EMAILS", "").strip()
     if not raw:
         return []
     return [e.strip().lower() for e in raw.split(",") if e.strip()]
+
 
 def get_allowed_emails() -> list[str]:
     allowed = []
@@ -17,20 +21,51 @@ def get_allowed_emails() -> list[str]:
         allowed = [str(e).strip().lower() for e in allowed if str(e).strip()]
     except Exception:
         allowed = []
+
     allowed_env = _parse_allowed_emails_from_env()
     return sorted(set(allowed + allowed_env))
 
-def early_access_gate(access_code: str):
-    st.title("Dropship Hub — Early Access")
-    st.caption("Drop ship made easy — exceptions, follow-ups, and visibility in one hub.")
-    code = st.text_input("Enter early access code", type="password", key="access_code")
+
+def require_early_access_code_gate(
+    *,
+    public_review_mode: bool = False,
+    env_var: str = "DSH_ACCESS_CODE",
+    default_code: str = "early2026",
+    key: str = "auth_access_code",
+) -> None:
+    """
+    Early access gate:
+      - bypassed when public_review_mode=True
+      - compares against env var DSH_ACCESS_CODE (or default_code)
+    """
+    if public_review_mode:
+        return
+
+    access_code = os.getenv(env_var, default_code)
+
+    st.subheader("Early access")
+    code = st.text_input("Enter early access code", type="password", key=key)
     if code != access_code:
         st.info("This app is currently in early access. Enter your code to continue.")
         st.stop()
 
-def require_email_access_gate():
+
+def require_email_access_gate(
+    *,
+    public_review_mode: bool = False,
+    key: str = "auth_work_email",
+) -> None:
+    """
+    Email allowlist gate:
+      - bypassed when public_review_mode=True
+      - allowlist from st.secrets['ALLOWED_EMAILS'] + env DSH_ALLOWED_EMAILS
+      - if allowlist is empty: verification disabled (accept all emails)
+    """
+    if public_review_mode:
+        return
+
     st.subheader("Access")
-    email = st.text_input("Work email", key="auth_email").strip().lower()
+    email = st.text_input("Work email", key=key).strip().lower()
     allowed = get_allowed_emails()
 
     if allowed:
@@ -44,3 +79,16 @@ def require_email_access_gate():
         st.success("Email verified ✅")
     else:
         st.caption("Email verification is currently disabled (accepting all emails).")
+
+
+def require_access(
+    *,
+    public_review_mode: bool = False,
+) -> None:
+    """
+    Single entrypoint to enforce access:
+      1) early access code
+      2) email allowlist
+    """
+    require_early_access_code_gate(public_review_mode=public_review_mode)
+    require_email_access_gate(public_review_mode=public_review_mode)
