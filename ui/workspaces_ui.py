@@ -18,6 +18,12 @@ from core.workspaces import (
     build_run_history_df,
 )
 
+# Optional import: conversion is additive and must never break the app
+try:
+    from core.workspaces import convert_raw_snapshot_to_full_run
+except Exception:  # pragma: no cover
+    convert_raw_snapshot_to_full_run = None  # type: ignore
+
 
 @dataclass
 class WorkspacesResult:
@@ -52,6 +58,61 @@ def _is_raw_snapshot_run(run: dict) -> bool:
     return False
 
 
+def _consume_convert_snapshot_request(
+    *,
+    req_key: str,
+    ws_root: Path,
+    account_id: str,
+    store_id: str,
+    platform_hint: Optional[str],
+    loaded_key: str,
+) -> tuple[Optional[Path], Optional[str]]:
+    """
+    Consumes a queued conversion request and performs conversion if supported.
+
+    Returns (new_run_dir, message). message is informational; errors are returned as message too.
+    """
+    payload = st.session_state.get(req_key)
+    if not payload:
+        return None, None
+
+    # one-shot: clear immediately so we never loop
+    st.session_state[req_key] = None
+
+    if convert_raw_snapshot_to_full_run is None:
+        return None, "Conversion not available (missing converter)."
+
+    try:
+        snapshot_dir = Path(str(payload.get("snapshot_dir", "") or ""))
+        target_ws = str(payload.get("target_workspace", "default") or "default")
+        src_ws = str(payload.get("source_workspace", "") or "")
+        src_run = str(payload.get("source_run_id", "") or "")
+        note = f"Converted from RAW snapshot {src_ws}/{src_run}".strip()
+
+        new_dir, err = convert_raw_snapshot_to_full_run(
+            ws_root=ws_root,
+            snapshot_dir=snapshot_dir,
+            target_workspace_name=target_ws,
+            account_id=account_id,
+            store_id=store_id,
+            platform_hint=platform_hint or "",
+            note=note,
+        )
+
+        if err:
+            return None, f"Conversion failed: {err}"
+
+        if new_dir:
+            st.session_state[loaded_key] = str(new_dir)
+            label = f"{target_ws}/{new_dir.name}"
+            return new_dir, f"Converted ✅ Saved as {label}"
+
+        return None, "Conversion failed: unknown error"
+
+    except Exception as e:
+        return None, f"Conversion failed: {e}"
+
+
 def render_workspaces_sidebar(
     workspaces_dir: Path,
     account_id: str,
@@ -79,7 +140,7 @@ def render_workspaces_sidebar(
       - Download run pack
       - View history
       - Delete run
-      - RAW demo snapshot actions (Load into Demo Mode / Convert to full run) [safe signals only]
+      - RAW demo snapshot actions (Load into Demo Mode / Convert to full run)
 
     Returns:
       WorkspacesResult with:
@@ -90,8 +151,9 @@ def render_workspaces_sidebar(
     Notes:
       - This function does NOT decide "open vs resolved"; it stores/loads followups as provided.
       - Back-compat: will also return overridden outputs if a run is loaded.
-      - RAW snapshot actions are implemented as session_state *requests* that other modules
-        may choose to handle. If nothing handles them, the app still works.
+      - RAW snapshot actions:
+          - Load into Demo Mode is handled by ui/demo.py (safe hook)
+          - Convert to full run is handled here (safe hook calling core converter)
     """
     ws_root = workspace_root(workspaces_dir, account_id, store_id)
     ws_root.mkdir(parents=True, exist_ok=True)
@@ -100,7 +162,7 @@ def render_workspaces_sidebar(
     if loaded_key not in st.session_state:
         st.session_state[loaded_key] = None
 
-    # Requests for other modules (safe, optional)
+    # Requests (safe)
     req_load_demo_key = f"{key_prefix}_req_load_snapshot_into_demo"
     req_convert_key = f"{key_prefix}_req_convert_snapshot_to_run"
     if req_load_demo_key not in st.session_state:
@@ -108,9 +170,33 @@ def render_workspaces_sidebar(
     if req_convert_key not in st.session_state:
         st.session_state[req_convert_key] = None
 
+    # Consume queued conversion request (if any). Never fatal.
+    conversion_banner: Optional[str] = None
+    try:
+        _new_dir, msg = _consume_convert_snapshot_request(
+            req_key=req_convert_key,
+            ws_root=ws_root,
+            account_id=account_id,
+            store_id=store_id,
+            platform_hint=platform_hint,
+            loaded_key=loaded_key,
+        )
+        conversion_banner = msg
+    except Exception:
+        conversion_banner = None
+
     with st.sidebar:
         st.divider()
         st.header("Workspaces")
+
+        if conversion_banner:
+            # success or failure message (safe)
+            if conversion_banner.startswith("Converted ✅"):
+                st.success(conversion_banner)
+            elif conversion_banner.startswith("Conversion failed"):
+                st.warning(conversion_banner)
+            else:
+                st.info(conversion_banner)
 
         if issue_tracker_path is not None:
             st.caption(f"Issue tracker file: `{issue_tracker_path.as_posix()}`")
@@ -167,7 +253,7 @@ def render_workspaces_sidebar(
                     "Convert target workspace",
                     value=workspace_name,
                     key=f"{key_prefix}_raw_convert_target_ws",
-                    help="Where the converted full run should be saved (conversion handler decides final path).",
+                    help="Where the converted full run should be saved.",
                 )
 
                 r1, r2 = st.columns(2)
@@ -193,7 +279,8 @@ def render_workspaces_sidebar(
                                 "source_workspace": str(raw_runs[raw_idx].get("workspace_name", "")),
                                 "source_run_id": str(raw_runs[raw_idx].get("run_id", "")),
                             }
-                            st.success("Requested ✅ (handled by Workspaces/Core)")
+                            st.success("Converting… ✅")
+                            st.rerun()
                         except Exception as e:
                             st.warning(f"Could not queue conversion request: {e}")
 
