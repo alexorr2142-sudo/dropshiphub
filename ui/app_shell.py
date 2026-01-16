@@ -235,18 +235,21 @@ def _safe_imports() -> _ShellDeps:
         ],
     )
 
+    # ✅ Try likely modules in your core/ tree (sla_escalations, sla_dates, scorecards, actions)
     add_urgency_column = _require_import(
         "add_urgency_column",
         [
-            lambda: __import__("core.urgency", fromlist=["add_urgency_column"]).add_urgency_column,
-            lambda: __import__("urgency", fromlist=["add_urgency_column"]).add_urgency_column,
+            lambda: __import__("core.sla_escalations", fromlist=["add_urgency_column"]).add_urgency_column,
+            lambda: __import__("core.sla_dates", fromlist=["add_urgency_column"]).add_urgency_column,
+            lambda: __import__("core.scorecards", fromlist=["add_urgency_column"]).add_urgency_column,
+            lambda: __import__("core.actions", fromlist=["add_urgency_column"]).add_urgency_column,
         ],
     )
+
     build_supplier_scorecard_from_run = _require_import(
         "build_supplier_scorecard_from_run",
         [
-            lambda: __import__("core.supplier_scorecards", fromlist=["build_supplier_scorecard_from_run"]).build_supplier_scorecard_from_run,
-            lambda: __import__("supplier_scorecards", fromlist=["build_supplier_scorecard_from_run"]).build_supplier_scorecard_from_run,
+            lambda: __import__("core.scorecards", fromlist=["build_supplier_scorecard_from_run"]).build_supplier_scorecard_from_run,
             lambda: __import__("core.supplier_accountability", fromlist=["build_supplier_scorecard_from_run"]).build_supplier_scorecard_from_run,
         ],
     )
@@ -254,8 +257,7 @@ def _safe_imports() -> _ShellDeps:
         "make_daily_ops_pack_bytes",
         [
             lambda: __import__("core.ops_pack", fromlist=["make_daily_ops_pack_bytes"]).make_daily_ops_pack_bytes,
-            lambda: __import__("ops_pack", fromlist=["make_daily_ops_pack_bytes"]).make_daily_ops_pack_bytes,
-            lambda: __import__("core.packs", fromlist=["make_daily_ops_pack_bytes"]).make_daily_ops_pack_bytes,
+            lambda: __import__("core.comms_pack", fromlist=["make_daily_ops_pack_bytes"]).make_daily_ops_pack_bytes,
         ],
     )
 
