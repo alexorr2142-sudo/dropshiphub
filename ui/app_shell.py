@@ -62,7 +62,7 @@ class _ShellDeps:
     render_kpi_trends: Optional[Callable[..., Any]]
     render_workspaces_sidebar: Optional[Callable[..., Any]]
 
-    # paths init (yes, currently in core/)
+    # paths init
     init_paths: Callable[..., tuple[Path, Path, Path, Path]]
 
 
@@ -118,7 +118,6 @@ def _call_with_accepted_kwargs(fn: Callable[..., Any], **kwargs):
 def _require_import(name: str, import_attempts: list[Callable[[], Any]]) -> Any:
     """
     Try a list of import attempt callables. If none work, stop with a clear error.
-    This avoids guessing paths silently and keeps the failure obvious.
     """
     last: Optional[Exception] = None
     for attempt in import_attempts:
@@ -221,7 +220,7 @@ def _safe_imports() -> _ShellDeps:
         ],
     )
 
-    # ✅ Correct location per your repo: core/suppliers.py
+    # core/suppliers.py (confirmed)
     enrich_followups_with_suppliers = _require_import(
         "enrich_followups_with_suppliers",
         [
@@ -235,7 +234,7 @@ def _safe_imports() -> _ShellDeps:
         ],
     )
 
-    # ✅ Try likely modules in your core/ tree (sla_escalations, sla_dates, scorecards, actions)
+    # Likely in one of these core modules
     add_urgency_column = _require_import(
         "add_urgency_column",
         [
@@ -253,6 +252,7 @@ def _safe_imports() -> _ShellDeps:
             lambda: __import__("core.supplier_accountability", fromlist=["build_supplier_scorecard_from_run"]).build_supplier_scorecard_from_run,
         ],
     )
+
     make_daily_ops_pack_bytes = _require_import(
         "make_daily_ops_pack_bytes",
         [
@@ -277,7 +277,6 @@ def _safe_imports() -> _ShellDeps:
     except Exception:
         build_customer_impact_view = None
 
-    # Optional issue tracker integration hook (if your repo has it)
     try:
         from core.issue_tracker_apply import apply_issue_tracker  # type: ignore
     except Exception:
@@ -288,13 +287,11 @@ def _safe_imports() -> _ShellDeps:
     except Exception:
         render_issue_tracker_maintenance = None
 
-    # Optional mailto helper (if present)
     try:
         from ui.app_sections import mailto_fallback as mailto_link  # type: ignore
     except Exception:
         mailto_link = None
 
-    # Optional workspaces override hook (if present)
     try:
         from ui.workspaces_ui import render_workspaces_sidebar_and_maybe_override_outputs  # type: ignore
     except Exception:
@@ -341,8 +338,6 @@ def _safe_imports() -> _ShellDeps:
 def render_app() -> None:
     """
     The main app body AFTER access gates.
-
-    app.py should remain an orchestrator; this file owns UI composition.
     """
     deps = _safe_imports()
 
@@ -373,7 +368,7 @@ def render_app() -> None:
         except Exception:
             st.warning("Onboarding checklist failed to render (non-critical).")
 
-    # Uploads + templates (must fail-safe; demo must still run)
+    # Uploads + templates (fail-safe)
     try:
         uploads = _call_with_accepted_kwargs(deps.render_upload_and_templates)
     except Exception as e:
@@ -397,7 +392,7 @@ def render_app() -> None:
         raw_tracking=raw_tracking,
     )
 
-    # Run the REAL pipeline (raw -> normalize -> reconcile -> artifacts)
+    # Run pipeline
     pipe = deps.run_pipeline(
         raw_orders=raw_orders,
         raw_shipments=raw_shipments,
@@ -431,7 +426,7 @@ def render_app() -> None:
 
     view = dict(pipe) if isinstance(pipe, dict) else {}
 
-    # Backward-compat mapping for UI expectations
+    # Backward-compat mapping
     if "supplier_scorecards" not in view and "scorecard" in view:
         view["supplier_scorecards"] = view.get("scorecard", pd.DataFrame())
 
@@ -450,55 +445,108 @@ def render_app() -> None:
     )
 
     with tabs[0]:
-        deps.render_dashboard(
-            kpis=view.get("kpis", {}),
-            run_history_df=view.get("run_history_df", pd.DataFrame()),
-        )
+        try:
+            _call_with_accepted_kwargs(
+                deps.render_dashboard,
+                kpis=view.get("kpis", {}),
+                run_history_df=view.get("run_history_df", pd.DataFrame()),
+                view=view,
+            )
+        except Exception as e:
+            st.warning("Dashboard failed to render (non-critical).")
+            st.code(str(e))
 
     with tabs[1]:
-        deps.render_ops_triage(
-            exceptions=view.get("exceptions", pd.DataFrame()),
-            followups_open=view.get("followups_open", pd.DataFrame()),
-        )
+        try:
+            _call_with_accepted_kwargs(
+                deps.render_ops_triage,
+                exceptions=view.get("exceptions", pd.DataFrame()),
+                followups_open=view.get("followups_open", pd.DataFrame()),
+                view=view,
+            )
+        except Exception as e:
+            st.warning("Ops triage failed to render (non-critical).")
+            st.code(str(e))
 
     with tabs[2]:
-        deps.render_exceptions_queue_section(
-            exceptions=view.get("exceptions", pd.DataFrame()),
-        )
+        try:
+            _call_with_accepted_kwargs(
+                deps.render_exceptions_queue_section,
+                exceptions=view.get("exceptions", pd.DataFrame()),
+                view=view,
+            )
+        except Exception as e:
+            st.warning("Exceptions queue failed to render (non-critical).")
+            st.code(str(e))
 
     with tabs[3]:
-        deps.render_supplier_scorecards(
-            supplier_scorecards=view.get("supplier_scorecards", pd.DataFrame()),
-        )
+        try:
+            _call_with_accepted_kwargs(
+                deps.render_supplier_scorecards,
+                supplier_scorecards=view.get("supplier_scorecards", pd.DataFrame()),
+                scorecard=view.get("scorecard", pd.DataFrame()),
+                view=view,
+            )
+        except Exception as e:
+            st.warning("Supplier scorecards failed to render (non-critical).")
+            st.code(str(e))
 
     with tabs[4]:
-        deps.render_ops_outreach_comms(
-            followups_open=view.get("followups_open", pd.DataFrame()),
-            customer_impact=view.get("customer_impact", pd.DataFrame()),
-            mailto_link=view.get("mailto_link", ""),
-        )
+        try:
+            _call_with_accepted_kwargs(
+                deps.render_ops_outreach_comms,
+                followups_open=view.get("followups_open", pd.DataFrame()),
+                customer_impact=view.get("customer_impact", pd.DataFrame()),
+                mailto_link=view.get("mailto_link", ""),
+                view=view,
+            )
+        except Exception as e:
+            st.warning("Ops outreach failed to render (non-critical).")
+            st.code(str(e))
 
     with tabs[5]:
-        if callable(deps.render_sla_escalations_panel):
-            deps.render_sla_escalations_panel(escalations_df=view.get("escalations_df", pd.DataFrame()))
-        else:
-            df = view.get("escalations_df", pd.DataFrame())
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                st.dataframe(df, use_container_width=True)
+        try:
+            if callable(deps.render_sla_escalations_panel):
+                _call_with_accepted_kwargs(
+                    deps.render_sla_escalations_panel,
+                    escalations_df=view.get("escalations_df", pd.DataFrame()),
+                    view=view,
+                )
             else:
-                st.caption("SLA escalations UI not available.")
+                df = view.get("escalations_df", pd.DataFrame())
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    st.dataframe(df, use_container_width=True)
+                else:
+                    st.caption("SLA escalations UI not available.")
+        except Exception as e:
+            st.warning("SLA escalations failed to render (non-critical).")
+            st.code(str(e))
 
     with tabs[6]:
-        issue_tracker_path = view.get("issue_tracker_path", None)
-        if callable(deps.render_issue_tracker_ui) and issue_tracker_path:
-            deps.render_issue_tracker_ui(issue_tracker_path=issue_tracker_path)
-        else:
-            st.caption("Follow-up tracker UI not available.")
+        try:
+            issue_tracker_path = view.get("issue_tracker_path", None)
+            if callable(deps.render_issue_tracker_ui) and issue_tracker_path:
+                _call_with_accepted_kwargs(
+                    deps.render_issue_tracker_ui,
+                    issue_tracker_path=issue_tracker_path,
+                    view=view,
+                )
+            else:
+                st.caption("Follow-up tracker UI not available.")
+        except Exception as e:
+            st.warning("Follow-up tracker failed to render (non-critical).")
+            st.code(str(e))
 
     with tabs[7]:
         if callable(deps.render_kpi_trends):
             try:
-                deps.render_kpi_trends(workspaces_dir=workspaces_dir, account_id=account_id, store_id=store_id)
+                _call_with_accepted_kwargs(
+                    deps.render_kpi_trends,
+                    workspaces_dir=workspaces_dir,
+                    account_id=account_id,
+                    store_id=store_id,
+                    view=view,
+                )
             except Exception as e:
                 st.warning("KPI trends UI failed to render (non-critical).")
                 st.code(str(e))
