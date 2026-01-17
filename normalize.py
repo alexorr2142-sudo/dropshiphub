@@ -1,10 +1,20 @@
-"""Backwards-compatible normalization API.
-
-Keep this file small (<300 lines). Real implementations live in core/normalize_mod/.
+"""
+Thin compatibility wrapper.
+Real implementations live in core/normalize/.
 """
 
-from __future__ import annotations
+from core.normalize import (
+    SHOPIFY_COLUMN_MAP,
+    detect_shopify_orders,
+    normalize_orders,
+    normalize_shipments,
+    normalize_tracking,
+)
 
-from core.normalize_mod.orders import SHOPIFY_COLUMN_MAP, detect_shopify_orders, normalize_orders
-from core.normalize_mod.shipments import normalize_shipments
-from core.normalize_mod.tracking import normalize_tracking
+__all__ = [
+    "SHOPIFY_COLUMN_MAP",
+    "detect_shopify_orders",
+    "normalize_orders",
+    "normalize_shipments",
+    "normalize_tracking",
+]
