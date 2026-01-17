@@ -1,6 +1,9 @@
+# normalize.py
 """
-Thin compatibility wrapper.
-Real implementations live in core/normalize/.
+Backwards-compatible normalization API (root-level import).
+
+Keeps old imports working:
+  from normalize import normalize_orders, ...
 """
 
 from core.normalize import (
