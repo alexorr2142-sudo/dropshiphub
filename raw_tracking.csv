@@ -1,0 +1,4 @@
+Carrier,Tracking Number,Order ID,Supplier Order ID,Status,Last Update,Delivered At,Exception
+UPS,1Z999AA101,#1001,AS-1001,Delivered,2025-01-05,2025-01-05,
+FedEx,449044304137,#1002,BL-2002,In Transit,2025-01-03,,
+DHL,JD014600006281828000,#1003,GE-3003,Exception,2025-01-06,,Customs delay
